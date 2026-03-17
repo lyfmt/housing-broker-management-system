@@ -4867,7 +4867,7 @@ static void main_menu(void) {
     int ch;
     while (1) {
         platform_clear_screen();
-        ui_banner("租房管理系统 (跨平台版)");
+        ui_banner("房屋中介管理系统 (跨平台版)");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
         printf("1. 管理员登录\n2. 中介登录\n3. 租客登录\n4. 租客注册\n5. 保存数据\n6. 从默认文件恢复\n7. 管理员密码找回(已禁用)\n8. 中介密码找回\n9. 租客密码找回\n10. 生成演示数据\n0. 退出系统\n");
         ch = input_int("请选择: ", 0, 10);
