@@ -935,11 +935,16 @@ static int id_exists_any(int id) {
 }
 
 static int generate_next_tenant_id(void) {
-    int id;
-    for (id = TENANT_ID_MIN; id <= TENANT_ID_MAX; ++id) {
-        if (!find_tenant(id)) return id;
+    int maxId = TENANT_ID_MIN - 1;
+    TenantNode *t;
+
+    for (t = g_db.tenants; t; t = t->next) {
+        if (t->data.id > maxId) maxId = t->data.id;
     }
-    return 0;
+
+    if (maxId < TENANT_ID_MIN) return TENANT_ID_MIN;
+    if (maxId >= TENANT_ID_MAX) return 0;
+    return maxId + 1;
 }
 
 static int generate_next_viewing_id(void) {
