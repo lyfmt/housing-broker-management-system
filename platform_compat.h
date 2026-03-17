@@ -19,9 +19,15 @@ static inline int platform_enable_virtual_terminal(void) {
     return 1;
 }
 #else
+#include <time.h>
 #include <unistd.h>
 #define PATH_SEPARATOR "/"
-static inline void platform_sleep_ms(unsigned int ms) { usleep((useconds_t)ms * 1000u); }
+static inline void platform_sleep_ms(unsigned int ms) {
+    clock_t start = clock();
+    clock_t waitTicks = (clock_t)(((double)ms / 1000.0) * CLOCKS_PER_SEC);
+    while ((clock() - start) < waitTicks) {
+    }
+}
 static inline void platform_setup_utf8_console(void) { }
 static inline int platform_enable_virtual_terminal(void) { return 1; }
 #endif

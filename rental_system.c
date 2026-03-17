@@ -58,6 +58,10 @@ static int contains_case_insensitive(const char *s, const char *sub);
 static const char *viewing_state_text(int s);
 static const char *rental_sign_state_text(int s);
 static int collect_related_agents_for_house(int houseId, int *ids, int maxN);
+static int has_open_contract_for_house(int houseId, int ignoreId);
+static int house_is_open_for_viewing(const House *h);
+static int appointment_time_is_in_future(const char *dt);
+static void format_viewing_feedback(char *out, size_t size, const char *action, const char *now, const char *detail);
 
 static int is_back_token(const char *s) {
     return s && (strcmp(s, "#") == 0 || strcmp(s, "-1") == 0);
@@ -410,6 +414,13 @@ static time_t datetime_to_time(const char *s) {
     return mktime(&t);
 }
 
+static int appointment_time_is_in_future(const char *dt) {
+    time_t target = datetime_to_time(dt);
+    time_t now = time(NULL);
+    if (target == (time_t)-1) return 0;
+    return difftime(target, now) > 0.0;
+}
+
 static int overlaps(time_t s1, time_t e1, time_t s2, time_t e2) {
     return !(e1 <= s2 || e2 <= s1);
 }
@@ -570,11 +581,13 @@ static int generate_next_viewing_id(void) {
     return maxId + 1;
 }
 
-static const char *tenant_house_state_text(int status) {
-    if (status == HOUSE_VACANT) return "可租";
-    if (status == HOUSE_RENTED) return "已租";
-    if (status == HOUSE_PENDING) return "待审核";
-    if (status == HOUSE_OFFLINE) return "已下架";
+static const char *tenant_house_state_text(const House *h) {
+    if (!h) return "未知";
+    if (h->status == HOUSE_VACANT && has_open_contract_for_house(h->id, -1)) return "待签约";
+    if (h->status == HOUSE_VACANT) return "可预约";
+    if (h->status == HOUSE_RENTED) return "已租";
+    if (h->status == HOUSE_PENDING) return "待审核";
+    if (h->status == HOUSE_OFFLINE) return "已下架";
     return "未知";
 }
 
@@ -661,8 +674,12 @@ static void make_appointment_for_tenant(int tenantId, int houseId) {
         printf("房源不存在。\n");
         return;
     }
-    if (h->data.status != HOUSE_VACANT) {
-        printf("该房源当前不可预约(仅可租房源可预约)。\n");
+    if (!house_is_open_for_viewing(&h->data)) {
+        if (h->data.status == HOUSE_VACANT && has_open_contract_for_house(h->data.id, -1)) {
+            printf("该房源已有待签或生效中的合同，暂不可预约。\n");
+        } else {
+            printf("该房源当前不可预约(仅可预约上架且未签约房源)。\n");
+        }
         return;
     }
 
@@ -673,8 +690,15 @@ static void make_appointment_for_tenant(int tenantId, int houseId) {
     v.agentId = (h->data.createdByAgentId > 0) ? h->data.createdByAgentId : 0;
     while (1) {
         input_non_empty("看房时间(YYYY-MM-DD HH:MM): ", v.datetime, sizeof(v.datetime));
-        if (validate_datetime(v.datetime)) break;
-        printf("时间格式错误。\n");
+        if (!validate_datetime(v.datetime)) {
+            printf("时间格式错误。\n");
+            continue;
+        }
+        if (!appointment_time_is_in_future(v.datetime)) {
+            printf("预约时间必须晚于当前时间。\n");
+            continue;
+        }
+        break;
     }
     v.durationMinutes = input_int("时长(分钟): ", 10, 600);
 
@@ -754,12 +778,13 @@ static void search_houses_for_tenant(int tenantId) {
     maxP = input_double("最高价格: ", minP, 10000000.0);
     minA = input_double("最小面积: ", 0.0, 100000.0);
     maxA = input_double("最大面积: ", minA, 100000.0);
-    printf("状态筛选可选: 0.全部  1.可租  2.已租\n");
+    printf("状态筛选可选: 0.全部  1.可预约  2.暂不可预约\n");
     stFilter = input_int("请选择状态筛选编号: ", 0, 2);
 
     printf("\n%-8s %-16s %-14s %-8s %-10s %-8s\n", "ID", "小区", "户型", "面积", "价格", "状态");
     printf("------------------------------------------------------------------------\n");
     for (h = g_db.houses; h; h = h->next) {
+        int availableForViewing;
         int stateOk;
         int floorOk = 1;
         if (regionKw[0] && !contains_case_insensitive(h->data.region, regionKw)) continue;
@@ -769,8 +794,9 @@ static void search_houses_for_tenant(int tenantId) {
         if (h->data.price < minP || h->data.price > maxP) continue;
         if (h->data.area < minA || h->data.area > maxA) continue;
 
-        stateOk = (stFilter == 0) || (stFilter == 1 && h->data.status == HOUSE_VACANT) ||
-                  (stFilter == 2 && h->data.status == HOUSE_RENTED);
+        availableForViewing = house_is_open_for_viewing(&h->data);
+        stateOk = (stFilter == 0) || (stFilter == 1 && availableForViewing) ||
+                  (stFilter == 2 && !availableForViewing);
         if (!stateOk) continue;
 
         if (floorKw[0]) {
@@ -786,7 +812,7 @@ static void search_houses_for_tenant(int tenantId) {
 
         printf("%-8d %-16s %-14s %-8.2f %-10.2f %-8s\n",
                h->data.id, h->data.community, h->data.houseType, h->data.area, h->data.price,
-               tenant_house_state_text(h->data.status));
+               tenant_house_state_text(&h->data));
         cnt++;
     }
     if (!cnt) {
@@ -893,7 +919,7 @@ static void tenant_view_houses_with_agents(void) {
     int cnt = 0;
     ui_section("可预约房源与对应中介");
     for (h = g_db.houses; h; h = h->next) {
-        if (h->data.status == HOUSE_OFFLINE || h->data.status == HOUSE_PENDING) continue;
+        if (!house_is_open_for_viewing(&h->data)) continue;
         print_house_detailed(&h->data);
         print_house_agents_for_tenant(h->data.id);
         printf("\n");
@@ -1190,6 +1216,34 @@ static int has_open_contract_for_house(int houseId, int ignoreId) {
     return 0;
 }
 
+static int house_is_open_for_viewing(const House *h) {
+    if (!h) return 0;
+    if (h->status != HOUSE_VACANT) return 0;
+    return !has_open_contract_for_house(h->id, -1);
+}
+
+static void append_feedback_fragment(char *out, size_t size, const char *fragment) {
+    size_t used;
+    if (!out || size == 0 || !fragment) return;
+    used = strlen(out);
+    if (used >= size - 1) return;
+    strncpy(out + used, fragment, size - used - 1);
+    out[size - 1] = '\0';
+}
+
+static void format_viewing_feedback(char *out, size_t size, const char *action, const char *now, const char *detail) {
+    if (!out || size == 0) return;
+    out[0] = '\0';
+    append_feedback_fragment(out, size, action ? action : "");
+    append_feedback_fragment(out, size, "(");
+    append_feedback_fragment(out, size, now ? now : "");
+    append_feedback_fragment(out, size, ")");
+    if (detail && detail[0]) {
+        append_feedback_fragment(out, size, ": ");
+        append_feedback_fragment(out, size, detail);
+    }
+}
+
 static int tenant_has_pending_rental(int tenantId) {
     RentalNode *r;
     for (r = g_db.rentals; r; r = r->next) {
@@ -1294,7 +1348,7 @@ static void update_expired_rentals(void) {
     struct tm *pt = localtime(&now);
     char today[11];
     if (!pt) return;
-    snprintf(today, sizeof(today), "%04d-%02d-%02d", pt->tm_year + 1900, pt->tm_mon + 1, pt->tm_mday);
+    if (strftime(today, sizeof(today), "%Y-%m-%d", pt) == 0) return;
 
     for (r = g_db.rentals; r; r = r->next) {
         if (r->data.signStatus == RENTAL_SIGN_CONFIRMED &&
@@ -2707,11 +2761,7 @@ static void process_pending_viewings_for_agent(int agentId) {
             read_line(note, sizeof(note));
             get_current_datetime(now, sizeof(now));
             v->data.status = VIEWING_CONFIRMED;
-            if (note[0]) {
-                snprintf(v->data.agentFeedback, sizeof(v->data.agentFeedback), "同意(%s): %s", now, note);
-            } else {
-                snprintf(v->data.agentFeedback, sizeof(v->data.agentFeedback), "同意(%s)", now);
-            }
+            format_viewing_feedback(v->data.agentFeedback, sizeof(v->data.agentFeedback), "同意", now, note);
             autosave_default();
             printf("已同意预约。\n");
         } else if (op == 2) {
@@ -2720,7 +2770,7 @@ static void process_pending_viewings_for_agent(int agentId) {
             input_non_empty("拒绝理由: ", reason, sizeof(reason));
             get_current_datetime(now, sizeof(now));
             v->data.status = VIEWING_CANCELLED;
-            snprintf(v->data.agentFeedback, sizeof(v->data.agentFeedback), "拒绝(%s): %s", now, reason);
+            format_viewing_feedback(v->data.agentFeedback, sizeof(v->data.agentFeedback), "拒绝", now, reason);
             autosave_default();
             printf("已拒绝预约。\n");
         }
@@ -3162,6 +3212,10 @@ static void update_viewing_for_agent(int agentId) {
         printf("时间格式错误。\n");
         return;
     }
+    if (dt[0] && !appointment_time_is_in_future(dt)) {
+        printf("预约时间必须晚于当前时间。\n");
+        return;
+    }
     if (viewing_conflict(dt[0] ? dt : v->data.datetime, dur, v->data.houseId, v->data.agentId, v->data.id)) {
         printf("时间冲突。\n");
         return;
@@ -3252,6 +3306,10 @@ static void update_viewing_for_tenant(int tenantId) {
 
     if (dt[0] && !validate_datetime(dt)) {
         printf("时间格式错误。\n");
+        return;
+    }
+    if (dt[0] && !appointment_time_is_in_future(dt)) {
+        printf("预约时间必须晚于当前时间。\n");
         return;
     }
     if (viewing_conflict(dt[0] ? dt : v->data.datetime, dur, v->data.houseId, aid, v->data.id)) {
@@ -3843,10 +3901,21 @@ static void query_house_availability_by_time(void) {
     }
     while (1) {
         input_non_empty("查询时间(YYYY-MM-DD HH:MM): ", dt, sizeof(dt));
-        if (validate_datetime(dt)) break;
-        printf("时间格式错误。\n");
+        if (!validate_datetime(dt)) {
+            printf("时间格式错误。\n");
+            continue;
+        }
+        if (!appointment_time_is_in_future(dt)) {
+            printf("查询时间必须晚于当前时间。\n");
+            continue;
+        }
+        break;
     }
     dur = input_int("时长(分钟): ", 10, 600);
+    if (!house_is_open_for_viewing(&h->data)) {
+        printf("该房源当前不可预约。\n");
+        return;
+    }
     if (viewing_conflict(dt, dur, houseId, 0, -1)) {
         printf("该时段房源已被预约冲突占用。\n");
     } else {
