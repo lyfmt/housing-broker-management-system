@@ -2606,6 +2606,11 @@ static void add_rental_for_agent(int agentId) {
     Rental r;
     HouseNode *h;
 
+    if (!reload_database_for_sync()) {
+        printf("数据同步失败，无法发起合同。\n");
+        return;
+    }
+
     r.id = input_int("租房ID: ", 1, 99999999);
     if (id_exists_any(r.id)) {
         printf("ID重复。\n");
@@ -2662,6 +2667,32 @@ static void add_rental_for_agent(int agentId) {
     r.monthlyRent = input_double("实际月租: ", 0.01, 10000000.0);
     r.status = RENTAL_ACTIVE;
     r.signStatus = RENTAL_SIGN_PENDING;
+
+    if (!reload_database_for_sync()) {
+        printf("数据同步失败，无法确认最新合同状态。\n");
+        return;
+    }
+    if (id_exists_any(r.id)) {
+        printf("租房ID已被其他会话占用，请重新发起。\n");
+        return;
+    }
+    h = find_house(r.houseId);
+    if (!h) {
+        printf("房源已不存在，请刷新后重试。\n");
+        return;
+    }
+    if (h->data.status != HOUSE_VACANT) {
+        printf("房源状态已变化，当前不可签约。\n");
+        return;
+    }
+    if (has_open_contract_for_house(r.houseId, -1)) {
+        printf("该房源已有待签或生效中的租约，不能重复发起。\n");
+        return;
+    }
+    if (!find_tenant(r.tenantId)) {
+        printf("租客已不存在，请刷新后重试。\n");
+        return;
+    }
 
     if (!append_rental(&r)) {
         printf("内存不足。\n");

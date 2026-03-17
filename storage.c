@@ -158,6 +158,12 @@ static int read_i32_le(FILE *fp, int *value) {
     return 1;
 }
 
+static int read_i32_native(FILE *fp, int *value) {
+    if (!value) return 0;
+    READ_FIELD(fp, value, sizeof(*value));
+    return 1;
+}
+
 static int write_u64_le(FILE *fp, uint64_t value) {
     unsigned char bytes[8];
     int i;
@@ -195,6 +201,12 @@ static int read_double_le(FILE *fp, double *value) {
     return 1;
 }
 
+static int read_double_native(FILE *fp, double *value) {
+    if (!value) return 0;
+    READ_FIELD(fp, value, sizeof(*value));
+    return 1;
+}
+
 static int write_fixed_text(FILE *fp, const char *text, size_t size) {
     WRITE_FIELD(fp, text, size);
     return 1;
@@ -206,6 +218,17 @@ static int read_fixed_text(FILE *fp, char *text, size_t size) {
     return 1;
 }
 
+static int decode_i32_le_bytes(const unsigned char bytes[4], int *value) {
+    uint32_t raw;
+    if (!value) return 0;
+    raw = (uint32_t)bytes[0]
+        | ((uint32_t)bytes[1] << 8)
+        | ((uint32_t)bytes[2] << 16)
+        | ((uint32_t)bytes[3] << 24);
+    *value = (int)(int32_t)raw;
+    return 1;
+}
+
 static int write_header(FILE *fp) {
     WRITE_FIELD(fp, STORAGE_MAGIC, 4);
     return write_i32_le(fp, STORAGE_VERSION);
@@ -213,9 +236,29 @@ static int write_header(FILE *fp) {
 
 static int read_header(FILE *fp, int *version) {
     char magic[4];
+    unsigned char versionBytes[4];
+    int nativeVersion = 0;
+    int littleVersion = 0;
     if (fread(magic, sizeof(magic), 1, fp) != 1) return 0;
     if (memcmp(magic, STORAGE_MAGIC, 4) != 0) return 0;
-    return read_i32_le(fp, version);
+    if (fread(versionBytes, sizeof(versionBytes), 1, fp) != 1) return 0;
+    if (sizeof(nativeVersion) == sizeof(versionBytes)) {
+        memcpy(&nativeVersion, versionBytes, sizeof(versionBytes));
+    }
+    if (!decode_i32_le_bytes(versionBytes, &littleVersion)) return 0;
+    if (nativeVersion == 2 || nativeVersion == 3) {
+        *version = nativeVersion;
+        return 1;
+    }
+    if (littleVersion == STORAGE_VERSION) {
+        *version = littleVersion;
+        return 1;
+    }
+    if (nativeVersion == STORAGE_VERSION) {
+        *version = nativeVersion;
+        return 1;
+    }
+    return 0;
 }
 
 static int write_category_list_record(FILE *fp, const CategoryList *list) {
@@ -266,6 +309,16 @@ static int write_agent_record(FILE *fp, const Agent *agent) {
 static int read_agent_record(FILE *fp, Agent *agent) {
     if (!agent) return 0;
     if (!read_i32_le(fp, &agent->id)) return 0;
+    if (!read_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    if (!read_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
+    if (!read_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
+    if (!read_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
+    return 1;
+}
+
+static int read_agent_record_native(FILE *fp, Agent *agent) {
+    if (!agent) return 0;
+    READ_FIELD(fp, &agent->id, sizeof(agent->id));
     if (!read_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
     if (!read_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
     if (!read_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
@@ -396,6 +449,21 @@ static int read_rental_record(FILE *fp, Rental *rental) {
     if (!read_double_le(fp, &rental->monthlyRent)) return 0;
     if (!read_i32_le(fp, &rental->status)) return 0;
     if (!read_i32_le(fp, &rental->signStatus)) return 0;
+    return 1;
+}
+
+static int read_rental_record_native(FILE *fp, Rental *rental) {
+    if (!rental) return 0;
+    READ_FIELD(fp, &rental->id, sizeof(rental->id));
+    READ_FIELD(fp, &rental->houseId, sizeof(rental->houseId));
+    READ_FIELD(fp, &rental->tenantId, sizeof(rental->tenantId));
+    READ_FIELD(fp, &rental->agentId, sizeof(rental->agentId));
+    if (!read_fixed_text(fp, rental->contractDate, sizeof(rental->contractDate))) return 0;
+    if (!read_fixed_text(fp, rental->startDate, sizeof(rental->startDate))) return 0;
+    if (!read_fixed_text(fp, rental->endDate, sizeof(rental->endDate))) return 0;
+    if (!read_double_native(fp, &rental->monthlyRent)) return 0;
+    READ_FIELD(fp, &rental->status, sizeof(rental->status));
+    READ_FIELD(fp, &rental->signStatus, sizeof(rental->signStatus));
     return 1;
 }
 
@@ -543,7 +611,7 @@ static void free_loaded_lists(Database *db) {
     free_rental_list(&db->rentals);
 }
 
-static int load_agent_list(FILE *fp, AgentNode **head, int *count) {
+static int load_agent_list_v4(FILE *fp, AgentNode **head, int *count) {
     int i, cnt;
     AgentNode *tail = NULL;
     *head = NULL;
@@ -572,12 +640,41 @@ static int load_agent_list(FILE *fp, AgentNode **head, int *count) {
     return 1;
 }
 
+static int load_agent_list_v3(FILE *fp, AgentNode **head, int *count) {
+    int i, cnt;
+    AgentNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        AgentNode *n = (AgentNode *)malloc(sizeof(AgentNode));
+        if (!n) {
+            free_agent_list(head);
+            return 0;
+        }
+        if (!read_agent_record_native(fp, &n->data)) {
+            free(n);
+            free_agent_list(head);
+            return 0;
+        }
+        sanitize_agent(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
 static int load_legacy_agent_list(FILE *fp, AgentNode **head, int *count) {
     int i, cnt;
     AgentNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         LegacyAgent legacy;
         AgentNode *n = (AgentNode *)malloc(sizeof(AgentNode));
@@ -612,7 +709,7 @@ static int load_tenant_list_v3(FILE *fp, TenantNode **head, int *count) {
     TenantNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         TenantNode *n = (TenantNode *)malloc(sizeof(TenantNode));
         if (!n) {
@@ -670,7 +767,7 @@ static int load_house_list_v3(FILE *fp, HouseNode **head, int *count) {
     HouseNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         HouseNode *n = (HouseNode *)malloc(sizeof(HouseNode));
         if (!n) {
@@ -728,7 +825,7 @@ static int load_viewing_list_v3(FILE *fp, ViewingNode **head, int *count) {
     ViewingNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         ViewingNode *n = (ViewingNode *)malloc(sizeof(ViewingNode));
         if (!n) {
@@ -781,7 +878,7 @@ static int load_viewing_list_v4(FILE *fp, ViewingNode **head, int *count) {
     return 1;
 }
 
-static int load_rental_list(FILE *fp, RentalNode **head, int *count) {
+static int load_rental_list_v4(FILE *fp, RentalNode **head, int *count) {
     int i, cnt;
     RentalNode *tail = NULL;
     *head = NULL;
@@ -810,12 +907,41 @@ static int load_rental_list(FILE *fp, RentalNode **head, int *count) {
     return 1;
 }
 
+static int load_rental_list_v3(FILE *fp, RentalNode **head, int *count) {
+    int i, cnt;
+    RentalNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        RentalNode *n = (RentalNode *)malloc(sizeof(RentalNode));
+        if (!n) {
+            free_rental_list(head);
+            return 0;
+        }
+        if (!read_rental_record_native(fp, &n->data)) {
+            free(n);
+            free_rental_list(head);
+            return 0;
+        }
+        sanitize_rental(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
 static int load_legacy_rental_list_v2(FILE *fp, RentalNode **head, int *count) {
     int i, cnt;
     RentalNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_native(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         LegacyRentalV2 legacy;
         RentalNode *n = (RentalNode *)malloc(sizeof(RentalNode));
@@ -895,7 +1021,8 @@ int storage_load(const char *filename, Database *db) {
         }
     }
 
-    if (!((hasHeader && load_agent_list(fp, &tmp.agents, &tmp.agentCount)) ||
+    if (!((version >= STORAGE_VERSION && load_agent_list_v4(fp, &tmp.agents, &tmp.agentCount)) ||
+          ((hasHeader && version < STORAGE_VERSION) && load_agent_list_v3(fp, &tmp.agents, &tmp.agentCount)) ||
           (!hasHeader && load_legacy_agent_list(fp, &tmp.agents, &tmp.agentCount))) ||
         !((version >= STORAGE_VERSION && load_tenant_list_v4(fp, &tmp.tenants, &tmp.tenantCount)) ||
           (version < STORAGE_VERSION && load_tenant_list_v3(fp, &tmp.tenants, &tmp.tenantCount))) ||
@@ -904,7 +1031,8 @@ int storage_load(const char *filename, Database *db) {
         !((version >= STORAGE_VERSION && load_viewing_list_v4(fp, &tmp.viewings, &tmp.viewingCount)) ||
           (version < STORAGE_VERSION && load_viewing_list_v3(fp, &tmp.viewings, &tmp.viewingCount))) ||
         !((version == 2 && load_legacy_rental_list_v2(fp, &tmp.rentals, &tmp.rentalCount)) ||
-          (version != 2 && load_rental_list(fp, &tmp.rentals, &tmp.rentalCount)))) {
+          (version >= STORAGE_VERSION && load_rental_list_v4(fp, &tmp.rentals, &tmp.rentalCount)) ||
+          ((version != 2 && version < STORAGE_VERSION) && load_rental_list_v3(fp, &tmp.rentals, &tmp.rentalCount)))) {
         free_loaded_lists(&tmp);
         fclose(fp);
         return 0;

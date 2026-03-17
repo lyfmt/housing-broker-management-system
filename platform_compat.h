@@ -19,14 +19,14 @@ static inline int platform_enable_virtual_terminal(void) {
     return 1;
 }
 #else
-#include <time.h>
+#include <sys/select.h>
 #include <unistd.h>
 #define PATH_SEPARATOR "/"
 static inline void platform_sleep_ms(unsigned int ms) {
-    clock_t start = clock();
-    clock_t waitTicks = (clock_t)(((double)ms / 1000.0) * CLOCKS_PER_SEC);
-    while ((clock() - start) < waitTicks) {
-    }
+    struct timeval tv;
+    tv.tv_sec = (long)(ms / 1000u);
+    tv.tv_usec = (int)((ms % 1000u) * 1000u);
+    (void)select(0, NULL, NULL, NULL, &tv);
 }
 static inline void platform_setup_utf8_console(void) { }
 static inline int platform_enable_virtual_terminal(void) { return 1; }
