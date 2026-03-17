@@ -1,0 +1,8 @@
+rental_system
+rental_system_analyzer
+*.o
+*.obj
+*.exe
+*.out
+rental_data.dat
+.DS_Store
