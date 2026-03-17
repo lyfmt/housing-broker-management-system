@@ -1,15 +1,16 @@
 /*
  * storage.c — 逐记录读写链表数据到文件
- * 文件格式：结构化二进制，每段先写 int count，再逐条写入数据域
+ * v4 开始使用稳定的逐字段小端序格式，避免结构体整体写入带来的填充差异
  */
 #include "storage.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define STORAGE_MAGIC "RMS2"
-#define STORAGE_VERSION 3
+#define STORAGE_VERSION 4
 
 typedef struct {
     int id;
@@ -32,77 +33,9 @@ typedef struct {
 
 /* ---------- 辅助宏：写/读固定大小数据块 ---------- */
 #define WRITE_FIELD(fp, ptr, sz) \
-    do { if (fwrite((ptr), (sz), 1, (fp)) != 1) return 0; } while(0)
+    do { if (fwrite((ptr), (sz), 1, (fp)) != 1) return 0; } while (0)
 #define READ_FIELD(fp, ptr, sz) \
-    do { if (fread((ptr), (sz), 1, (fp)) != 1) return 0; } while(0)
-
-static int write_int(FILE *fp, int v) {
-    WRITE_FIELD(fp, &v, sizeof(int));
-    return 1;
-}
-
-static int read_int(FILE *fp, int *v) {
-    READ_FIELD(fp, v, sizeof(int));
-    return 1;
-}
-
-static int write_header(FILE *fp) {
-    WRITE_FIELD(fp, STORAGE_MAGIC, 4);
-    return write_int(fp, STORAGE_VERSION);
-}
-
-static int read_header(FILE *fp, int *version) {
-    char magic[4];
-    if (fread(magic, sizeof(magic), 1, fp) != 1) return 0;
-    if (memcmp(magic, STORAGE_MAGIC, 4) != 0) return 0;
-    return read_int(fp, version);
-}
-
-static int write_agent_record(FILE *fp, const Agent *agent) {
-    WRITE_FIELD(fp, &agent->id, sizeof(agent->id));
-    WRITE_FIELD(fp, agent->name, sizeof(agent->name));
-    WRITE_FIELD(fp, agent->phone, sizeof(agent->phone));
-    WRITE_FIELD(fp, agent->idCard, sizeof(agent->idCard));
-    WRITE_FIELD(fp, agent->password, sizeof(agent->password));
-    return 1;
-}
-
-static int read_agent_record(FILE *fp, Agent *agent) {
-    READ_FIELD(fp, &agent->id, sizeof(agent->id));
-    READ_FIELD(fp, agent->name, sizeof(agent->name));
-    READ_FIELD(fp, agent->phone, sizeof(agent->phone));
-    READ_FIELD(fp, agent->idCard, sizeof(agent->idCard));
-    READ_FIELD(fp, agent->password, sizeof(agent->password));
-    return 1;
-}
-
-static int write_rental_record(FILE *fp, const Rental *rental) {
-    WRITE_FIELD(fp, &rental->id, sizeof(rental->id));
-    WRITE_FIELD(fp, &rental->houseId, sizeof(rental->houseId));
-    WRITE_FIELD(fp, &rental->tenantId, sizeof(rental->tenantId));
-    WRITE_FIELD(fp, &rental->agentId, sizeof(rental->agentId));
-    WRITE_FIELD(fp, rental->contractDate, sizeof(rental->contractDate));
-    WRITE_FIELD(fp, rental->startDate, sizeof(rental->startDate));
-    WRITE_FIELD(fp, rental->endDate, sizeof(rental->endDate));
-    WRITE_FIELD(fp, &rental->monthlyRent, sizeof(rental->monthlyRent));
-    WRITE_FIELD(fp, &rental->status, sizeof(rental->status));
-    WRITE_FIELD(fp, &rental->signStatus, sizeof(rental->signStatus));
-    return 1;
-}
-
-static int read_rental_record(FILE *fp, Rental *rental) {
-    READ_FIELD(fp, &rental->id, sizeof(rental->id));
-    READ_FIELD(fp, &rental->houseId, sizeof(rental->houseId));
-    READ_FIELD(fp, &rental->tenantId, sizeof(rental->tenantId));
-    READ_FIELD(fp, &rental->agentId, sizeof(rental->agentId));
-    READ_FIELD(fp, rental->contractDate, sizeof(rental->contractDate));
-    READ_FIELD(fp, rental->startDate, sizeof(rental->startDate));
-    READ_FIELD(fp, rental->endDate, sizeof(rental->endDate));
-    READ_FIELD(fp, &rental->monthlyRent, sizeof(rental->monthlyRent));
-    READ_FIELD(fp, &rental->status, sizeof(rental->status));
-    READ_FIELD(fp, &rental->signStatus, sizeof(rental->signStatus));
-    return 1;
-}
+    do { if (fread((ptr), (sz), 1, (fp)) != 1) return 0; } while (0)
 
 static void sanitize_string_field(char *field, size_t size) {
     if (!field || size == 0) return;
@@ -192,32 +125,305 @@ static void sanitize_database(Database *db) {
     for (rentalCur = db->rentals; rentalCur; rentalCur = rentalCur->next) sanitize_rental(&rentalCur->data);
 }
 
+static int write_u32_le(FILE *fp, uint32_t value) {
+    unsigned char bytes[4];
+    bytes[0] = (unsigned char)(value & 0xFFu);
+    bytes[1] = (unsigned char)((value >> 8) & 0xFFu);
+    bytes[2] = (unsigned char)((value >> 16) & 0xFFu);
+    bytes[3] = (unsigned char)((value >> 24) & 0xFFu);
+    WRITE_FIELD(fp, bytes, sizeof(bytes));
+    return 1;
+}
+
+static int read_u32_le(FILE *fp, uint32_t *value) {
+    unsigned char bytes[4];
+    if (!value) return 0;
+    READ_FIELD(fp, bytes, sizeof(bytes));
+    *value = (uint32_t)bytes[0]
+           | ((uint32_t)bytes[1] << 8)
+           | ((uint32_t)bytes[2] << 16)
+           | ((uint32_t)bytes[3] << 24);
+    return 1;
+}
+
+static int write_i32_le(FILE *fp, int value) {
+    return write_u32_le(fp, (uint32_t)(int32_t)value);
+}
+
+static int read_i32_le(FILE *fp, int *value) {
+    uint32_t raw;
+    if (!value) return 0;
+    if (!read_u32_le(fp, &raw)) return 0;
+    *value = (int)(int32_t)raw;
+    return 1;
+}
+
+static int write_u64_le(FILE *fp, uint64_t value) {
+    unsigned char bytes[8];
+    int i;
+    for (i = 0; i < 8; ++i) {
+        bytes[i] = (unsigned char)((value >> (i * 8)) & 0xFFu);
+    }
+    WRITE_FIELD(fp, bytes, sizeof(bytes));
+    return 1;
+}
+
+static int read_u64_le(FILE *fp, uint64_t *value) {
+    unsigned char bytes[8];
+    int i;
+    if (!value) return 0;
+    READ_FIELD(fp, bytes, sizeof(bytes));
+    *value = 0;
+    for (i = 0; i < 8; ++i) {
+        *value |= ((uint64_t)bytes[i]) << (i * 8);
+    }
+    return 1;
+}
+
+static int write_double_le(FILE *fp, double value) {
+    uint64_t bits = 0;
+    if (sizeof(double) != sizeof(bits)) return 0;
+    memcpy(&bits, &value, sizeof(bits));
+    return write_u64_le(fp, bits);
+}
+
+static int read_double_le(FILE *fp, double *value) {
+    uint64_t bits = 0;
+    if (!value || sizeof(double) != sizeof(bits)) return 0;
+    if (!read_u64_le(fp, &bits)) return 0;
+    memcpy(value, &bits, sizeof(bits));
+    return 1;
+}
+
+static int write_fixed_text(FILE *fp, const char *text, size_t size) {
+    WRITE_FIELD(fp, text, size);
+    return 1;
+}
+
+static int read_fixed_text(FILE *fp, char *text, size_t size) {
+    READ_FIELD(fp, text, size);
+    sanitize_string_field(text, size);
+    return 1;
+}
+
+static int write_header(FILE *fp) {
+    WRITE_FIELD(fp, STORAGE_MAGIC, 4);
+    return write_i32_le(fp, STORAGE_VERSION);
+}
+
+static int read_header(FILE *fp, int *version) {
+    char magic[4];
+    if (fread(magic, sizeof(magic), 1, fp) != 1) return 0;
+    if (memcmp(magic, STORAGE_MAGIC, 4) != 0) return 0;
+    return read_i32_le(fp, version);
+}
+
+static int write_category_list_record(FILE *fp, const CategoryList *list) {
+    int i;
+    int count = 0;
+    if (list) count = list->count;
+    if (count < 0) count = 0;
+    if (count > MAX_CATEGORY_ITEMS) count = MAX_CATEGORY_ITEMS;
+    if (!write_i32_le(fp, count)) return 0;
+    for (i = 0; i < count; ++i) {
+        if (!write_fixed_text(fp, list->items[i], sizeof(list->items[i]))) return 0;
+    }
+    return 1;
+}
+
+static int read_category_list_record(FILE *fp, CategoryList *list) {
+    int count, i;
+    char discard[MAX_STR];
+    if (!list) return 0;
+    memset(list, 0, sizeof(*list));
+    if (!read_i32_le(fp, &count) || count < 0) return 0;
+    for (i = 0; i < count; ++i) {
+        char *slot = (i < MAX_CATEGORY_ITEMS) ? list->items[i] : discard;
+        if (!read_fixed_text(fp, slot, MAX_STR)) return 0;
+    }
+    list->count = (count > MAX_CATEGORY_ITEMS) ? MAX_CATEGORY_ITEMS : count;
+    sanitize_category_list(list);
+    return 1;
+}
+
+static int read_legacy_category_list(FILE *fp, CategoryList *list) {
+    if (!list) return 0;
+    READ_FIELD(fp, list, sizeof(*list));
+    sanitize_category_list(list);
+    return 1;
+}
+
+static int write_agent_record(FILE *fp, const Agent *agent) {
+    if (!agent) return 0;
+    if (!write_i32_le(fp, agent->id)) return 0;
+    if (!write_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    if (!write_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
+    if (!write_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
+    if (!write_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
+    return 1;
+}
+
+static int read_agent_record(FILE *fp, Agent *agent) {
+    if (!agent) return 0;
+    if (!read_i32_le(fp, &agent->id)) return 0;
+    if (!read_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    if (!read_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
+    if (!read_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
+    if (!read_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
+    return 1;
+}
+
+static int write_tenant_record(FILE *fp, const Tenant *tenant) {
+    if (!tenant) return 0;
+    if (!write_i32_le(fp, tenant->id)) return 0;
+    if (!write_fixed_text(fp, tenant->name, sizeof(tenant->name))) return 0;
+    if (!write_fixed_text(fp, tenant->phone, sizeof(tenant->phone))) return 0;
+    if (!write_fixed_text(fp, tenant->idCard, sizeof(tenant->idCard))) return 0;
+    if (!write_fixed_text(fp, tenant->password, sizeof(tenant->password))) return 0;
+    return 1;
+}
+
+static int read_tenant_record(FILE *fp, Tenant *tenant) {
+    if (!tenant) return 0;
+    if (!read_i32_le(fp, &tenant->id)) return 0;
+    if (!read_fixed_text(fp, tenant->name, sizeof(tenant->name))) return 0;
+    if (!read_fixed_text(fp, tenant->phone, sizeof(tenant->phone))) return 0;
+    if (!read_fixed_text(fp, tenant->idCard, sizeof(tenant->idCard))) return 0;
+    if (!read_fixed_text(fp, tenant->password, sizeof(tenant->password))) return 0;
+    return 1;
+}
+
+static int write_house_record(FILE *fp, const House *house) {
+    if (!house) return 0;
+    if (!write_i32_le(fp, house->id)) return 0;
+    if (!write_fixed_text(fp, house->city, sizeof(house->city))) return 0;
+    if (!write_fixed_text(fp, house->region, sizeof(house->region))) return 0;
+    if (!write_fixed_text(fp, house->community, sizeof(house->community))) return 0;
+    if (!write_fixed_text(fp, house->address, sizeof(house->address))) return 0;
+    if (!write_fixed_text(fp, house->building, sizeof(house->building))) return 0;
+    if (!write_i32_le(fp, house->floor)) return 0;
+    if (!write_fixed_text(fp, house->unitNo, sizeof(house->unitNo))) return 0;
+    if (!write_fixed_text(fp, house->floorNote, sizeof(house->floorNote))) return 0;
+    if (!write_fixed_text(fp, house->orientation, sizeof(house->orientation))) return 0;
+    if (!write_fixed_text(fp, house->houseType, sizeof(house->houseType))) return 0;
+    if (!write_double_le(fp, house->area)) return 0;
+    if (!write_fixed_text(fp, house->decoration, sizeof(house->decoration))) return 0;
+    if (!write_double_le(fp, house->price)) return 0;
+    if (!write_fixed_text(fp, house->ownerName, sizeof(house->ownerName))) return 0;
+    if (!write_fixed_text(fp, house->ownerPhone, sizeof(house->ownerPhone))) return 0;
+    if (!write_i32_le(fp, house->createdByAgentId)) return 0;
+    if (!write_i32_le(fp, house->status)) return 0;
+    if (!write_fixed_text(fp, house->rejectReason, sizeof(house->rejectReason))) return 0;
+    return 1;
+}
+
+static int read_house_record(FILE *fp, House *house) {
+    if (!house) return 0;
+    if (!read_i32_le(fp, &house->id)) return 0;
+    if (!read_fixed_text(fp, house->city, sizeof(house->city))) return 0;
+    if (!read_fixed_text(fp, house->region, sizeof(house->region))) return 0;
+    if (!read_fixed_text(fp, house->community, sizeof(house->community))) return 0;
+    if (!read_fixed_text(fp, house->address, sizeof(house->address))) return 0;
+    if (!read_fixed_text(fp, house->building, sizeof(house->building))) return 0;
+    if (!read_i32_le(fp, &house->floor)) return 0;
+    if (!read_fixed_text(fp, house->unitNo, sizeof(house->unitNo))) return 0;
+    if (!read_fixed_text(fp, house->floorNote, sizeof(house->floorNote))) return 0;
+    if (!read_fixed_text(fp, house->orientation, sizeof(house->orientation))) return 0;
+    if (!read_fixed_text(fp, house->houseType, sizeof(house->houseType))) return 0;
+    if (!read_double_le(fp, &house->area)) return 0;
+    if (!read_fixed_text(fp, house->decoration, sizeof(house->decoration))) return 0;
+    if (!read_double_le(fp, &house->price)) return 0;
+    if (!read_fixed_text(fp, house->ownerName, sizeof(house->ownerName))) return 0;
+    if (!read_fixed_text(fp, house->ownerPhone, sizeof(house->ownerPhone))) return 0;
+    if (!read_i32_le(fp, &house->createdByAgentId)) return 0;
+    if (!read_i32_le(fp, &house->status)) return 0;
+    if (!read_fixed_text(fp, house->rejectReason, sizeof(house->rejectReason))) return 0;
+    return 1;
+}
+
+static int write_viewing_record(FILE *fp, const Viewing *viewing) {
+    if (!viewing) return 0;
+    if (!write_i32_le(fp, viewing->id)) return 0;
+    if (!write_fixed_text(fp, viewing->datetime, sizeof(viewing->datetime))) return 0;
+    if (!write_i32_le(fp, viewing->houseId)) return 0;
+    if (!write_i32_le(fp, viewing->tenantId)) return 0;
+    if (!write_i32_le(fp, viewing->agentId)) return 0;
+    if (!write_i32_le(fp, viewing->durationMinutes)) return 0;
+    if (!write_i32_le(fp, viewing->status)) return 0;
+    if (!write_fixed_text(fp, viewing->tenantFeedback, sizeof(viewing->tenantFeedback))) return 0;
+    if (!write_fixed_text(fp, viewing->agentFeedback, sizeof(viewing->agentFeedback))) return 0;
+    return 1;
+}
+
+static int read_viewing_record(FILE *fp, Viewing *viewing) {
+    if (!viewing) return 0;
+    if (!read_i32_le(fp, &viewing->id)) return 0;
+    if (!read_fixed_text(fp, viewing->datetime, sizeof(viewing->datetime))) return 0;
+    if (!read_i32_le(fp, &viewing->houseId)) return 0;
+    if (!read_i32_le(fp, &viewing->tenantId)) return 0;
+    if (!read_i32_le(fp, &viewing->agentId)) return 0;
+    if (!read_i32_le(fp, &viewing->durationMinutes)) return 0;
+    if (!read_i32_le(fp, &viewing->status)) return 0;
+    if (!read_fixed_text(fp, viewing->tenantFeedback, sizeof(viewing->tenantFeedback))) return 0;
+    if (!read_fixed_text(fp, viewing->agentFeedback, sizeof(viewing->agentFeedback))) return 0;
+    return 1;
+}
+
+static int write_rental_record(FILE *fp, const Rental *rental) {
+    if (!rental) return 0;
+    if (!write_i32_le(fp, rental->id)) return 0;
+    if (!write_i32_le(fp, rental->houseId)) return 0;
+    if (!write_i32_le(fp, rental->tenantId)) return 0;
+    if (!write_i32_le(fp, rental->agentId)) return 0;
+    if (!write_fixed_text(fp, rental->contractDate, sizeof(rental->contractDate))) return 0;
+    if (!write_fixed_text(fp, rental->startDate, sizeof(rental->startDate))) return 0;
+    if (!write_fixed_text(fp, rental->endDate, sizeof(rental->endDate))) return 0;
+    if (!write_double_le(fp, rental->monthlyRent)) return 0;
+    if (!write_i32_le(fp, rental->status)) return 0;
+    if (!write_i32_le(fp, rental->signStatus)) return 0;
+    return 1;
+}
+
+static int read_rental_record(FILE *fp, Rental *rental) {
+    if (!rental) return 0;
+    if (!read_i32_le(fp, &rental->id)) return 0;
+    if (!read_i32_le(fp, &rental->houseId)) return 0;
+    if (!read_i32_le(fp, &rental->tenantId)) return 0;
+    if (!read_i32_le(fp, &rental->agentId)) return 0;
+    if (!read_fixed_text(fp, rental->contractDate, sizeof(rental->contractDate))) return 0;
+    if (!read_fixed_text(fp, rental->startDate, sizeof(rental->startDate))) return 0;
+    if (!read_fixed_text(fp, rental->endDate, sizeof(rental->endDate))) return 0;
+    if (!read_double_le(fp, &rental->monthlyRent)) return 0;
+    if (!read_i32_le(fp, &rental->status)) return 0;
+    if (!read_i32_le(fp, &rental->signStatus)) return 0;
+    return 1;
+}
+
 /* =================================================================
  *  保存
  * ================================================================= */
 int storage_save(const char *filename, const Database *db) {
     FILE *fp = fopen(filename, "wb");
-    if (!fp) return 0;
+    if (!fp || !db) return 0;
 
     if (!write_header(fp)) {
         fclose(fp);
         return 0;
     }
 
-    /* 管理员密码 */
-    WRITE_FIELD(fp, db->adminPassword, sizeof(db->adminPassword));
+    if (!write_fixed_text(fp, db->adminPassword, sizeof(db->adminPassword)) ||
+        !write_category_list_record(fp, &db->regions) ||
+        !write_category_list_record(fp, &db->floorNotes) ||
+        !write_category_list_record(fp, &db->orientations) ||
+        !write_category_list_record(fp, &db->houseTypes) ||
+        !write_category_list_record(fp, &db->decorations)) {
+        fclose(fp);
+        return 0;
+    }
 
-    /* 5 个分类列表 */
-    WRITE_FIELD(fp, &db->regions,      sizeof(CategoryList));
-    WRITE_FIELD(fp, &db->floorNotes,   sizeof(CategoryList));
-    WRITE_FIELD(fp, &db->orientations, sizeof(CategoryList));
-    WRITE_FIELD(fp, &db->houseTypes,   sizeof(CategoryList));
-    WRITE_FIELD(fp, &db->decorations,  sizeof(CategoryList));
-
-    /* 中介链表 */
     {
         AgentNode *cur;
-        if (!write_int(fp, db->agentCount)) { fclose(fp); return 0; }
+        if (!write_i32_le(fp, db->agentCount)) { fclose(fp); return 0; }
         for (cur = db->agents; cur; cur = cur->next) {
             if (!write_agent_record(fp, &cur->data)) {
                 fclose(fp);
@@ -226,34 +432,42 @@ int storage_save(const char *filename, const Database *db) {
         }
     }
 
-    /* 租客链表 */
     {
         TenantNode *cur;
-        if (!write_int(fp, db->tenantCount)) { fclose(fp); return 0; }
-        for (cur = db->tenants; cur; cur = cur->next)
-            WRITE_FIELD(fp, &cur->data, sizeof(Tenant));
+        if (!write_i32_le(fp, db->tenantCount)) { fclose(fp); return 0; }
+        for (cur = db->tenants; cur; cur = cur->next) {
+            if (!write_tenant_record(fp, &cur->data)) {
+                fclose(fp);
+                return 0;
+            }
+        }
     }
 
-    /* 房源链表 */
     {
         HouseNode *cur;
-        if (!write_int(fp, db->houseCount)) { fclose(fp); return 0; }
-        for (cur = db->houses; cur; cur = cur->next)
-            WRITE_FIELD(fp, &cur->data, sizeof(House));
+        if (!write_i32_le(fp, db->houseCount)) { fclose(fp); return 0; }
+        for (cur = db->houses; cur; cur = cur->next) {
+            if (!write_house_record(fp, &cur->data)) {
+                fclose(fp);
+                return 0;
+            }
+        }
     }
 
-    /* 看房链表 */
     {
         ViewingNode *cur;
-        if (!write_int(fp, db->viewingCount)) { fclose(fp); return 0; }
-        for (cur = db->viewings; cur; cur = cur->next)
-            WRITE_FIELD(fp, &cur->data, sizeof(Viewing));
+        if (!write_i32_le(fp, db->viewingCount)) { fclose(fp); return 0; }
+        for (cur = db->viewings; cur; cur = cur->next) {
+            if (!write_viewing_record(fp, &cur->data)) {
+                fclose(fp);
+                return 0;
+            }
+        }
     }
 
-    /* 租约链表 */
     {
         RentalNode *cur;
-        if (!write_int(fp, db->rentalCount)) { fclose(fp); return 0; }
+        if (!write_i32_le(fp, db->rentalCount)) { fclose(fp); return 0; }
         for (cur = db->rentals; cur; cur = cur->next) {
             if (!write_rental_record(fp, &cur->data)) {
                 fclose(fp);
@@ -320,12 +534,21 @@ static void free_rental_list(RentalNode **head) {
     *head = NULL;
 }
 
+static void free_loaded_lists(Database *db) {
+    if (!db) return;
+    free_agent_list(&db->agents);
+    free_tenant_list(&db->tenants);
+    free_house_list(&db->houses);
+    free_viewing_list(&db->viewings);
+    free_rental_list(&db->rentals);
+}
+
 static int load_agent_list(FILE *fp, AgentNode **head, int *count) {
     int i, cnt;
     AgentNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         AgentNode *n = (AgentNode *)malloc(sizeof(AgentNode));
         if (!n) {
@@ -354,7 +577,7 @@ static int load_legacy_agent_list(FILE *fp, AgentNode **head, int *count) {
     AgentNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         LegacyAgent legacy;
         AgentNode *n = (AgentNode *)malloc(sizeof(AgentNode));
@@ -384,12 +607,12 @@ static int load_legacy_agent_list(FILE *fp, AgentNode **head, int *count) {
     return 1;
 }
 
-static int load_tenant_list(FILE *fp, TenantNode **head, int *count) {
+static int load_tenant_list_v3(FILE *fp, TenantNode **head, int *count) {
     int i, cnt;
     TenantNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         TenantNode *n = (TenantNode *)malloc(sizeof(TenantNode));
         if (!n) {
@@ -413,12 +636,41 @@ static int load_tenant_list(FILE *fp, TenantNode **head, int *count) {
     return 1;
 }
 
-static int load_house_list(FILE *fp, HouseNode **head, int *count) {
+static int load_tenant_list_v4(FILE *fp, TenantNode **head, int *count) {
+    int i, cnt;
+    TenantNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        TenantNode *n = (TenantNode *)malloc(sizeof(TenantNode));
+        if (!n) {
+            free_tenant_list(head);
+            return 0;
+        }
+        if (!read_tenant_record(fp, &n->data)) {
+            free(n);
+            free_tenant_list(head);
+            return 0;
+        }
+        sanitize_tenant(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
+static int load_house_list_v3(FILE *fp, HouseNode **head, int *count) {
     int i, cnt;
     HouseNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         HouseNode *n = (HouseNode *)malloc(sizeof(HouseNode));
         if (!n) {
@@ -442,12 +694,41 @@ static int load_house_list(FILE *fp, HouseNode **head, int *count) {
     return 1;
 }
 
-static int load_viewing_list(FILE *fp, ViewingNode **head, int *count) {
+static int load_house_list_v4(FILE *fp, HouseNode **head, int *count) {
+    int i, cnt;
+    HouseNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        HouseNode *n = (HouseNode *)malloc(sizeof(HouseNode));
+        if (!n) {
+            free_house_list(head);
+            return 0;
+        }
+        if (!read_house_record(fp, &n->data)) {
+            free(n);
+            free_house_list(head);
+            return 0;
+        }
+        sanitize_house(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
+static int load_viewing_list_v3(FILE *fp, ViewingNode **head, int *count) {
     int i, cnt;
     ViewingNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         ViewingNode *n = (ViewingNode *)malloc(sizeof(ViewingNode));
         if (!n) {
@@ -471,12 +752,41 @@ static int load_viewing_list(FILE *fp, ViewingNode **head, int *count) {
     return 1;
 }
 
+static int load_viewing_list_v4(FILE *fp, ViewingNode **head, int *count) {
+    int i, cnt;
+    ViewingNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        ViewingNode *n = (ViewingNode *)malloc(sizeof(ViewingNode));
+        if (!n) {
+            free_viewing_list(head);
+            return 0;
+        }
+        if (!read_viewing_record(fp, &n->data)) {
+            free(n);
+            free_viewing_list(head);
+            return 0;
+        }
+        sanitize_viewing(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
 static int load_rental_list(FILE *fp, RentalNode **head, int *count) {
     int i, cnt;
     RentalNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         RentalNode *n = (RentalNode *)malloc(sizeof(RentalNode));
         if (!n) {
@@ -505,7 +815,7 @@ static int load_legacy_rental_list_v2(FILE *fp, RentalNode **head, int *count) {
     RentalNode *tail = NULL;
     *head = NULL;
     *count = 0;
-    if (!read_int(fp, &cnt) || cnt < 0) return 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
     for (i = 0; i < cnt; ++i) {
         LegacyRentalV2 legacy;
         RentalNode *n = (RentalNode *)malloc(sizeof(RentalNode));
@@ -545,56 +855,65 @@ int storage_load(const char *filename, Database *db) {
     FILE *fp = fopen(filename, "rb");
     Database tmp;
     int version = 0;
-    int isNewFormat = 0;
-    if (!fp) return 0;
+    int hasHeader = 0;
+    if (!fp || !db) return 0;
 
     memset(&tmp, 0, sizeof(tmp));
 
     if (read_header(fp, &version)) {
-        if (version != 2 && version != STORAGE_VERSION) {
+        if (version != 2 && version != 3 && version != STORAGE_VERSION) {
             fclose(fp);
             return 0;
         }
-        isNewFormat = 1;
+        hasHeader = 1;
     } else {
         rewind(fp);
     }
 
-    /* 管理员密码 */
-    READ_FIELD(fp, tmp.adminPassword, sizeof(tmp.adminPassword));
+    if (!read_fixed_text(fp, tmp.adminPassword, sizeof(tmp.adminPassword))) {
+        fclose(fp);
+        return 0;
+    }
 
-    /* 分类 */
-    READ_FIELD(fp, &tmp.regions,      sizeof(CategoryList));
-    READ_FIELD(fp, &tmp.floorNotes,   sizeof(CategoryList));
-    READ_FIELD(fp, &tmp.orientations, sizeof(CategoryList));
-    READ_FIELD(fp, &tmp.houseTypes,   sizeof(CategoryList));
-    READ_FIELD(fp, &tmp.decorations,  sizeof(CategoryList));
-    sanitize_database(&tmp);
+    if (version >= STORAGE_VERSION) {
+        if (!read_category_list_record(fp, &tmp.regions) ||
+            !read_category_list_record(fp, &tmp.floorNotes) ||
+            !read_category_list_record(fp, &tmp.orientations) ||
+            !read_category_list_record(fp, &tmp.houseTypes) ||
+            !read_category_list_record(fp, &tmp.decorations)) {
+            fclose(fp);
+            return 0;
+        }
+    } else {
+        if (!read_legacy_category_list(fp, &tmp.regions) ||
+            !read_legacy_category_list(fp, &tmp.floorNotes) ||
+            !read_legacy_category_list(fp, &tmp.orientations) ||
+            !read_legacy_category_list(fp, &tmp.houseTypes) ||
+            !read_legacy_category_list(fp, &tmp.decorations)) {
+            fclose(fp);
+            return 0;
+        }
+    }
 
-    if (!((isNewFormat && load_agent_list(fp, &tmp.agents, &tmp.agentCount)) ||
-          (!isNewFormat && load_legacy_agent_list(fp, &tmp.agents, &tmp.agentCount))) ||
-        !load_tenant_list(fp, &tmp.tenants, &tmp.tenantCount) ||
-        !load_house_list(fp, &tmp.houses, &tmp.houseCount) ||
-        !load_viewing_list(fp, &tmp.viewings, &tmp.viewingCount) ||
-                !((version == 2 && load_legacy_rental_list_v2(fp, &tmp.rentals, &tmp.rentalCount)) ||
-                    (version != 2 && load_rental_list(fp, &tmp.rentals, &tmp.rentalCount)))) {
-        free_agent_list(&tmp.agents);
-        free_tenant_list(&tmp.tenants);
-        free_house_list(&tmp.houses);
-        free_viewing_list(&tmp.viewings);
-        free_rental_list(&tmp.rentals);
+    if (!((hasHeader && load_agent_list(fp, &tmp.agents, &tmp.agentCount)) ||
+          (!hasHeader && load_legacy_agent_list(fp, &tmp.agents, &tmp.agentCount))) ||
+        !((version >= STORAGE_VERSION && load_tenant_list_v4(fp, &tmp.tenants, &tmp.tenantCount)) ||
+          (version < STORAGE_VERSION && load_tenant_list_v3(fp, &tmp.tenants, &tmp.tenantCount))) ||
+        !((version >= STORAGE_VERSION && load_house_list_v4(fp, &tmp.houses, &tmp.houseCount)) ||
+          (version < STORAGE_VERSION && load_house_list_v3(fp, &tmp.houses, &tmp.houseCount))) ||
+        !((version >= STORAGE_VERSION && load_viewing_list_v4(fp, &tmp.viewings, &tmp.viewingCount)) ||
+          (version < STORAGE_VERSION && load_viewing_list_v3(fp, &tmp.viewings, &tmp.viewingCount))) ||
+        !((version == 2 && load_legacy_rental_list_v2(fp, &tmp.rentals, &tmp.rentalCount)) ||
+          (version != 2 && load_rental_list(fp, &tmp.rentals, &tmp.rentalCount)))) {
+        free_loaded_lists(&tmp);
         fclose(fp);
         return 0;
     }
 
     fclose(fp);
+    sanitize_database(&tmp);
 
-    /* 旧数据仅在新数据完整加载成功后再释放 */
-    free_agent_list(&db->agents);
-    free_tenant_list(&db->tenants);
-    free_house_list(&db->houses);
-    free_viewing_list(&db->viewings);
-    free_rental_list(&db->rentals);
+    free_loaded_lists(db);
 
     memcpy(db->adminPassword, tmp.adminPassword, sizeof(db->adminPassword));
     db->regions = tmp.regions;
