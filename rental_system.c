@@ -5185,8 +5185,16 @@ static void login_agent(void) {
     if (!reload_database_for_sync()) {
         return;
     }
-    int id = input_int("中介ID: ", 1000, 4999);
-    AgentNode *a = find_agent(id);
+    int mode = input_int("登录方式 1中介ID 2手机号: ", 1, 2);
+    AgentNode *a = NULL;
+    if (mode == 1) {
+        int id = input_int("中介ID: ", 1000, 4999);
+        a = find_agent(id);
+    } else {
+        char phone[20];
+        input_non_empty("手机号: ", phone, sizeof(phone));
+        a = find_agent_by_phone(phone);
+    }
     if (!a) {
         printf("中介不存在。\n");
         return;
