@@ -1035,6 +1035,17 @@ static void input_optional_filter_with_choices(const CategoryList *list, const c
     out[size - 1] = '\0';
 }
 
+static void pick_supported_city(char *out, int size) {
+    int ch;
+    if (!out || size <= 0) return;
+    printf("城市可选: 1.沈阳\n");
+    ch = input_int("请选择城市编号: ", 1, 1);
+    if (ch == 1) {
+        strncpy(out, "沈阳", size - 1);
+        out[size - 1] = '\0';
+    }
+}
+
 static void collect_city_choices(CategoryList *out) {
     HouseNode *h;
     int i;
@@ -1050,6 +1061,26 @@ static void collect_city_choices(CategoryList *out) {
         if (i < out->count) continue;
         if (out->count >= MAX_CATEGORY_ITEMS) break;
         strncpy(out->items[out->count], city, MAX_STR - 1);
+        out->items[out->count][MAX_STR - 1] = '\0';
+        out->count++;
+    }
+}
+
+static void collect_community_choices(CategoryList *out) {
+    HouseNode *h;
+    int i;
+
+    if (!out) return;
+    out->count = 0;
+    for (h = g_db.houses; h; h = h->next) {
+        const char *community = h->data.community;
+        if (!community[0]) continue;
+        for (i = 0; i < out->count; ++i) {
+            if (strcmp(out->items[i], community) == 0) break;
+        }
+        if (i < out->count) continue;
+        if (out->count >= MAX_CATEGORY_ITEMS) break;
+        strncpy(out->items[out->count], community, MAX_STR - 1);
         out->items[out->count][MAX_STR - 1] = '\0';
         out->count++;
     }
@@ -1156,7 +1187,8 @@ static void make_appointment_for_tenant(int tenantId, int houseId) {
 }
 
 static void search_houses_for_tenant(int tenantId) {
-    char regionKw[MAX_STR], areaKw[MAX_BIG_STR], typeKw[MAX_STR], decoKw[MAX_STR], floorKw[MAX_STR];
+    char regionKw[MAX_STR], communityKw[MAX_STR], addressKw[MAX_BIG_STR], typeKw[MAX_STR], decoKw[MAX_STR], floorKw[MAX_STR];
+    CategoryList communityChoices;
     double minP, maxP, minA, maxA;
     int stFilter;
     HouseNode *h;
@@ -1167,8 +1199,10 @@ static void search_houses_for_tenant(int tenantId) {
 
     ui_section("查询房源(多条件筛选)");
     input_optional_filter_with_choices(&g_db.regions, "区域", regionKw, sizeof(regionKw));
-    printf("地段/小区关键字(可空，示例: 华润/万科/中路): ");
-    read_line(areaKw, sizeof(areaKw));
+    collect_community_choices(&communityChoices);
+    input_optional_filter_with_choices(&communityChoices, "小区", communityKw, sizeof(communityKw));
+    printf("地址关键字(可空，示例: 中路/青年大街): ");
+    read_line(addressKw, sizeof(addressKw));
     input_optional_filter_with_choices(&g_db.houseTypes, "户型", typeKw, sizeof(typeKw));
     input_optional_filter_with_choices(&g_db.decorations, "装修", decoKw, sizeof(decoKw));
     if (g_db.floorNotes.count > 0) {
@@ -1196,7 +1230,8 @@ static void search_houses_for_tenant(int tenantId) {
         int stateOk;
         int floorOk = 1;
         if (regionKw[0] && !contains_case_insensitive(h->data.region, regionKw)) continue;
-        if (areaKw[0] && !contains_case_insensitive(h->data.community, areaKw) && !contains_case_insensitive(h->data.address, areaKw)) continue;
+        if (communityKw[0] && !contains_case_insensitive(h->data.community, communityKw)) continue;
+        if (addressKw[0] && !contains_case_insensitive(h->data.address, addressKw)) continue;
         if (typeKw[0] && !contains_case_insensitive(h->data.houseType, typeKw)) continue;
         if (decoKw[0] && !contains_case_insensitive(h->data.decoration, decoKw)) continue;
         if (h->data.price < minP || h->data.price > maxP) continue;
@@ -2902,7 +2937,7 @@ static void add_house_item(void) {
         printf("ID重复。\n");
         return;
     }
-    input_non_empty("城市: ", h.city, sizeof(h.city));
+    pick_supported_city(h.city, sizeof(h.city));
     if (!category_pick(&g_db.regions, "区域", h.region)) return;
     input_non_empty("小区: ", h.community, sizeof(h.community));
     input_non_empty("路/街道地址: ", h.address, sizeof(h.address));
@@ -2938,7 +2973,7 @@ static void add_house_item_for_agent(int agentId) {
         printf("ID重复。\n");
         return;
     }
-    input_non_empty("城市: ", h.city, sizeof(h.city));
+    pick_supported_city(h.city, sizeof(h.city));
     if (!category_pick(&g_db.regions, "区域", h.region)) return;
     input_non_empty("小区: ", h.community, sizeof(h.community));
     input_non_empty("路/街道地址: ", h.address, sizeof(h.address));
@@ -4314,18 +4349,20 @@ static void sort_houses(void) {
 }
 
 static void query_houses_combo(void) {
-    char city[MAX_STR], region[MAX_STR], keyword[MAX_STR];
-    CategoryList cityChoices;
+    char city[MAX_STR], region[MAX_STR], community[MAX_STR], addressKw[MAX_STR];
+    CategoryList cityChoices, communityChoices;
     double minP, maxP, minA, maxA;
     int state;
     int cnt = 0;
     HouseNode *h;
 
     collect_city_choices(&cityChoices);
+    collect_community_choices(&communityChoices);
     input_optional_filter_with_choices(&cityChoices, "城市", city, sizeof(city));
     input_optional_filter_with_choices(&g_db.regions, "区域", region, sizeof(region));
-    printf("地址/小区关键字(可空): ");
-    read_line(keyword, sizeof(keyword));
+    input_optional_filter_with_choices(&communityChoices, "小区", community, sizeof(community));
+    printf("地址关键字(可空): ");
+    read_line(addressKw, sizeof(addressKw));
     minP = input_double("最低租金: ", 0.0, 10000000.0);
     maxP = input_double("最高租金: ", minP, 10000000.0);
     minA = input_double("最小面积: ", 0.0, 100000.0);
@@ -4336,7 +4373,8 @@ static void query_houses_combo(void) {
     for (h = g_db.houses; h; h = h->next) {
         if (!contains_case_insensitive(h->data.city, city)) continue;
         if (region[0] && strcmp(h->data.region, region) != 0) continue;
-        if (!contains_case_insensitive(h->data.community, keyword) && !contains_case_insensitive(h->data.address, keyword)) continue;
+        if (community[0] && !contains_case_insensitive(h->data.community, community)) continue;
+        if (addressKw[0] && !contains_case_insensitive(h->data.address, addressKw)) continue;
         if (h->data.price < minP || h->data.price > maxP) continue;
         if (h->data.area < minA || h->data.area > maxA) continue;
         if (state != -1 && h->data.status != state) continue;
@@ -4421,6 +4459,7 @@ static void category_manage_one(CategoryList *list, const char *title, int kind)
             strncpy(list->items[list->count], buf, MAX_STR - 1);
             list->items[list->count][MAX_STR - 1] = '\0';
             list->count++;
+            autosave_default();
             printf("新增成功。\n");
         } else {
             int idx;
@@ -4437,6 +4476,7 @@ static void category_manage_one(CategoryList *list, const char *title, int kind)
                 strcpy(list->items[i], list->items[i + 1]);
             }
             list->count--;
+            autosave_default();
             printf("删除成功。\n");
         }
     }
@@ -4696,11 +4736,6 @@ static void admin_menu(void) {
     int ch;
     while (1) {
         int needSave = 0;
-        if (!reload_database_for_sync()) {
-            printf("数据同步失败，已返回上一级。\n");
-            g_back_ctx = prev;
-            return;
-        }
         printf("\n====== 管理员菜单 ======\n");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
         printf("1. 信息管理-中介新增\n");
@@ -4737,6 +4772,10 @@ static void admin_menu(void) {
         if (ch == 0) {
             g_back_ctx = prev;
             return;
+        }
+        if (!reload_database_for_sync()) {
+            printf("数据同步失败，已取消本次操作，请重试。\n");
+            continue;
         }
         if (ch == 1) {
             add_agent_item();
@@ -4833,11 +4872,6 @@ static void agent_menu(AgentNode *a) {
     int ch;
     while (1) {
         int needSave = 0;
-        if (!reload_database_for_sync()) {
-            printf("数据同步失败，已返回上一级。\n");
-            g_back_ctx = prev;
-            return;
-        }
         printf("\n====== 中介菜单 ======\n");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
         printf("1. 新增租房合同\n");
@@ -4860,6 +4894,10 @@ static void agent_menu(AgentNode *a) {
         if (ch == 0) {
             g_back_ctx = prev;
             return;
+        }
+        if (!reload_database_for_sync()) {
+            printf("数据同步失败，已取消本次操作，请重试。\n");
+            continue;
         }
         if (ch == 1) {
             add_rental_for_agent(agentId);
@@ -4944,11 +4982,6 @@ static void tenant_menu(TenantNode *t) {
     int ch;
     while (1) {
         int needSave = 0;
-        if (!reload_database_for_sync()) {
-            printf("数据同步失败，已返回上一级。\n");
-            g_back_ctx = prev;
-            return;
-        }
         printf("\n====== 租客菜单 ======\n");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
         printf("1. 查询房源并预约(推荐)\n");
@@ -4967,6 +5000,10 @@ static void tenant_menu(TenantNode *t) {
         if (ch == 0) {
             g_back_ctx = prev;
             return;
+        }
+        if (!reload_database_for_sync()) {
+            printf("数据同步失败，已取消本次操作，请重试。\n");
+            continue;
         }
         if (!find_tenant(tenantId)) {
             printf("当前租客账号已不存在，请重新登录。\n");
