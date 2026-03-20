@@ -2577,18 +2577,15 @@ static void query_agent_items(void) {
 
 static void reset_agent_password_by_admin(void) {
     int id = input_int("中介ID: ", 1000, 4999);
-    char tempPwd[32];
     AgentNode *a = find_agent(id);
     if (!a) {
         printf("中介不存在。\n");
         return;
     }
-    generate_temporary_password(tempPwd, sizeof(tempPwd));
-    password_store(a->data.password, sizeof(a->data.password), tempPwd);
+    password_store(a->data.password, sizeof(a->data.password), DEFAULT_AGENT_PASSWORD);
     login_record_success(LOGIN_ROLE_AGENT, a->data.id);
-    printf("已重置为临时密码: %s\n", tempPwd);
+    printf("已重置为默认密码: %s\n", DEFAULT_AGENT_PASSWORD);
     printf("请通知该中介登录后立即修改密码。\n");
-    secure_zero(tempPwd, sizeof(tempPwd));
 }
 
 static void query_tenant_items(void) {
