@@ -557,6 +557,38 @@ static void trim_newline(char *s) {
     }
 }
 
+static void trim_ascii_whitespace_inplace(char *s) {
+    char *start;
+    char *end;
+    size_t len;
+    if (!s || !s[0]) return;
+    start = s;
+    while (*start && isspace((unsigned char)*start)) start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    len = strlen(s);
+    if (len == 0) return;
+    end = s + len - 1;
+    while (end >= s && isspace((unsigned char)*end)) {
+        *end = '\0';
+        if (end == s) break;
+        end--;
+    }
+}
+
+static int str_eq_trimmed(const char *a, const char *b) {
+    size_t aStart = 0, bStart = 0;
+    size_t aEnd, bEnd;
+    if (!a || !b) return 0;
+    aEnd = strlen(a);
+    bEnd = strlen(b);
+    while (aStart < aEnd && isspace((unsigned char)a[aStart])) aStart++;
+    while (bStart < bEnd && isspace((unsigned char)b[bStart])) bStart++;
+    while (aEnd > aStart && isspace((unsigned char)a[aEnd - 1])) aEnd--;
+    while (bEnd > bStart && isspace((unsigned char)b[bEnd - 1])) bEnd--;
+    if ((aEnd - aStart) != (bEnd - bStart)) return 0;
+    return strncmp(a + aStart, b + bStart, aEnd - aStart) == 0;
+}
+
 static int utf8_char_len(unsigned char c) {
     if ((c & 0x80) == 0) return 1;
     if ((c & 0xE0) == 0xC0) return 2;
@@ -602,6 +634,7 @@ static void read_line(char *buf, int size) {
         return;
     }
     trim_newline(buf);
+    trim_ascii_whitespace_inplace(buf);
     if (is_back_hash(buf)) {
         trigger_back_to_menu();
     }
@@ -893,7 +926,7 @@ static AgentNode *find_agent(int id) {
 static AgentNode *find_agent_by_phone(const char *phone) {
     AgentNode *cur;
     for (cur = g_db.agents; cur; cur = cur->next) {
-        if (strcmp(cur->data.phone, phone) == 0) return cur;
+        if (str_eq_trimmed(cur->data.phone, phone)) return cur;
     }
     return NULL;
 }
@@ -907,7 +940,7 @@ static TenantNode *find_tenant(int id) {
 static TenantNode *find_tenant_by_phone(const char *phone) {
     TenantNode *cur;
     for (cur = g_db.tenants; cur; cur = cur->next) {
-        if (strcmp(cur->data.phone, phone) == 0) return cur;
+        if (str_eq_trimmed(cur->data.phone, phone)) return cur;
     }
     return NULL;
 }
@@ -2373,7 +2406,7 @@ static AgentNode *locate_agent_interactively(void) {
         int cnt = 0;
         input_non_empty("姓名: ", name, sizeof(name));
         for (cur = g_db.agents; cur; cur = cur->next) {
-            if (strcmp(cur->data.name, name) == 0) {
+            if (str_eq_trimmed(cur->data.name, name)) {
                 printf("  ID:%-6d 姓名:%-16s 电话:%s\n",
                        cur->data.id, cur->data.name, cur->data.phone);
                 cnt++;
@@ -2382,7 +2415,7 @@ static AgentNode *locate_agent_interactively(void) {
         if (cnt == 0) { printf("未找到该姓名的中介。\n"); return NULL; }
         if (cnt == 1) {
             for (cur = g_db.agents; cur; cur = cur->next)
-                if (strcmp(cur->data.name, name) == 0) return cur;
+                if (str_eq_trimmed(cur->data.name, name)) return cur;
             return NULL;
         }
         /* 重名：需二次确认 */
@@ -2392,7 +2425,7 @@ static AgentNode *locate_agent_interactively(void) {
             if (sub == 1) {
                 int confId = input_int("中介ID: ", 1000, 4999);
                 AgentNode *found = find_agent(confId);
-                if (!found || strcmp(found->data.name, name) != 0) {
+                if (!found || str_eq_trimmed(found->data.name, name) == 0) {
                     printf("该ID不在同名名单中。\n");
                     return NULL;
                 }
@@ -2402,7 +2435,7 @@ static AgentNode *locate_agent_interactively(void) {
                 AgentNode *found;
                 input_non_empty("电话: ", phone, sizeof(phone));
                 found = find_agent_by_phone(phone);
-                if (!found || strcmp(found->data.name, name) != 0) {
+                if (!found || str_eq_trimmed(found->data.name, name) == 0) {
                     printf("该电话不在同名名单中。\n");
                     return NULL;
                 }
@@ -5192,14 +5225,55 @@ static void login_tenant(void) {
 }
 
 static void recover_admin_password(void) {
-    printf("出于安全原因，管理员不支持未登录找回密码。请使用管理员登录后在系统维护中修改密码。\n");
+    const char *expectedKey = getenv("RBMS_ADMIN_RECOVERY_KEY");
+    char inputKey[128];
+    char newPwd[32];
+    char confirmPwd[32];
+    if (!reload_database_for_sync()) {
+        printf("数据同步失败，找回已取消。\n");
+        return;
+    }
+    if (!expectedKey || !expectedKey[0]) {
+        printf("未配置管理员恢复密钥，无法未登录找回。\n");
+        printf("请先在启动程序前设置环境变量 RBMS_ADMIN_RECOVERY_KEY。\n");
+        printf("例如: export RBMS_ADMIN_RECOVERY_KEY='your-strong-key'\n");
+        printf("或使用管理员登录后在系统维护中修改密码。\n");
+        return;
+    }
+    input_non_empty("管理员恢复密钥: ", inputKey, sizeof(inputKey));
+    if (strcmp(inputKey, expectedKey) != 0) {
+        printf("恢复密钥错误。\n");
+        secure_zero(inputKey, sizeof(inputKey));
+        return;
+    }
+    while (1) {
+        input_non_empty("新密码(至少6位): ", newPwd, sizeof(newPwd));
+        if ((int)strlen(newPwd) < MIN_PASSWORD_LEN) {
+            printf("密码过短。\n");
+            continue;
+        }
+        input_non_empty("再次确认新密码: ", confirmPwd, sizeof(confirmPwd));
+        if (strcmp(newPwd, confirmPwd) != 0) {
+            printf("两次输入不一致，请重新输入。\n");
+            continue;
+        }
+        break;
+    }
+    password_store(g_db.adminPassword, sizeof(g_db.adminPassword), newPwd);
+    login_record_success(LOGIN_ROLE_ADMIN, 0);
+    autosave_default();
+    printf("管理员密码找回成功，请使用新密码登录。\n");
+    secure_zero(inputKey, sizeof(inputKey));
+    secure_zero(newPwd, sizeof(newPwd));
+    secure_zero(confirmPwd, sizeof(confirmPwd));
 }
 
 static void recover_agent_password(void) {
     int id = input_int("中介ID: ", 1000, 4999);
     char phone[20];
     char idCard[20];
-    char tempPwd[32];
+    char newPwd[32];
+    char confirmPwd[32];
     if (!reload_database_for_sync()) {
         printf("数据同步失败，找回已取消。\n");
         return;
@@ -5231,19 +5305,33 @@ static void recover_agent_password(void) {
         printf("身份证校验失败。\n");
         return;
     }
-    generate_temporary_password(tempPwd, sizeof(tempPwd));
-    password_store(a->data.password, sizeof(a->data.password), tempPwd);
+    while (1) {
+        input_non_empty("新密码(至少6位): ", newPwd, sizeof(newPwd));
+        if ((int)strlen(newPwd) < MIN_PASSWORD_LEN) {
+            printf("密码过短。\n");
+            continue;
+        }
+        input_non_empty("再次确认新密码: ", confirmPwd, sizeof(confirmPwd));
+        if (strcmp(newPwd, confirmPwd) != 0) {
+            printf("两次输入不一致，请重新输入。\n");
+            continue;
+        }
+        break;
+    }
+    password_store(a->data.password, sizeof(a->data.password), newPwd);
     login_record_success(LOGIN_ROLE_AGENT, a->data.id);
     autosave_default();
-    printf("校验通过，已重置为临时密码: %s\n", tempPwd);
-    printf("请使用临时密码登录，并立即在个人菜单中修改密码。\n");
-    secure_zero(tempPwd, sizeof(tempPwd));
+    printf("校验通过，密码已重置成功。\n");
+    printf("请使用新密码登录。\n");
+    secure_zero(newPwd, sizeof(newPwd));
+    secure_zero(confirmPwd, sizeof(confirmPwd));
 }
 
 static void recover_tenant_password(void) {
     int mode = input_int("找回方式 1租客ID 2手机号 0返回: ", 0, 2);
     char idCard[20];
-    char tempPwd[32];
+    char newPwd[32];
+    char confirmPwd[32];
     TenantNode *t = NULL;
     if (!reload_database_for_sync()) {
         printf("数据同步失败，找回已取消。\n");
@@ -5294,13 +5382,26 @@ static void recover_tenant_password(void) {
         printf("身份证校验失败。\n");
         return;
     }
-    generate_temporary_password(tempPwd, sizeof(tempPwd));
-    password_store(t->data.password, sizeof(t->data.password), tempPwd);
+    while (1) {
+        input_non_empty("新密码(至少6位): ", newPwd, sizeof(newPwd));
+        if ((int)strlen(newPwd) < MIN_PASSWORD_LEN) {
+            printf("密码过短。\n");
+            continue;
+        }
+        input_non_empty("再次确认新密码: ", confirmPwd, sizeof(confirmPwd));
+        if (strcmp(newPwd, confirmPwd) != 0) {
+            printf("两次输入不一致，请重新输入。\n");
+            continue;
+        }
+        break;
+    }
+    password_store(t->data.password, sizeof(t->data.password), newPwd);
     login_record_success(LOGIN_ROLE_TENANT, t->data.id);
     autosave_default();
-    printf("校验通过，已重置为临时密码: %s\n", tempPwd);
-    printf("请使用临时密码登录，并立即在个人菜单中修改密码。\n");
-    secure_zero(tempPwd, sizeof(tempPwd));
+    printf("校验通过，密码已重置成功。\n");
+    printf("请使用新密码登录。\n");
+    secure_zero(newPwd, sizeof(newPwd));
+    secure_zero(confirmPwd, sizeof(confirmPwd));
 }
 
 static void main_menu(void) {
@@ -5316,7 +5417,7 @@ static void main_menu(void) {
         platform_clear_screen();
         ui_banner("房屋中介管理系统 (跨平台版)");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
-        printf("1. 管理员登录\n2. 中介登录\n3. 租客登录\n4. 租客注册\n5. 保存数据\n6. 从默认文件恢复\n7. 管理员密码找回(已禁用)\n8. 中介密码找回\n9. 租客密码找回\n10. 生成演示数据\n0. 退出系统\n");
+        printf("1. 管理员登录\n2. 中介登录\n3. 租客登录\n4. 租客注册\n5. 保存数据\n6. 从默认文件恢复\n7. 管理员密码找回(恢复密钥)\n8. 中介密码找回\n9. 租客密码找回\n10. 生成演示数据\n0. 退出系统\n");
         ch = input_int("请选择: ", 0, 10);
         if (ch == 0) {
             ui_info("系统已退出。");
