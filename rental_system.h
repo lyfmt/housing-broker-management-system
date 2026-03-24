@@ -49,6 +49,7 @@ typedef struct {
 typedef struct {
     int id;
     char name[MAX_STR];
+    char gender[8];  /* 性别: "男" / "女" */
     char phone[20];
     char idCard[20];
     char password[32];
@@ -65,6 +66,7 @@ typedef struct AgentNode {
 typedef struct {
     int id;
     char name[MAX_STR];
+    char gender[8];  /* 性别: "男" / "女" */
     char phone[20];
     char idCard[20];
     char password[32];

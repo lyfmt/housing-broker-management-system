@@ -805,6 +805,23 @@ static int validate_id_card(const char *idCard) {
     return 1;
 }
 
+/* 功能: 校验性别值；输入: gender；输出: 1合法(男/女)/0非法 */
+static int validate_gender(const char *gender) {
+    if (!gender) return 0;
+    return strcmp(gender, "男") == 0 || strcmp(gender, "女") == 0;
+}
+
+/* 功能: 读取并校验性别；输入: out/size；输出: 无 */
+static void input_gender(char *out, int size) {
+    while (1) {
+        printf("性别(男/女): ");
+        read_line(out, size);
+        if (is_back_token(out)) trigger_back_to_menu();
+        if (validate_gender(out)) return;
+        printf("性别输入无效，请输入 男 或 女。\n");
+    }
+}
+
 /* 功能: 身份证脱敏；输入: idCard/out/outSize；输出: 无 */
 static void mask_id_card(const char *idCard, char *out, int outSize) {
     int i;
@@ -1130,7 +1147,11 @@ static void display_agents_for_selection(void) {
     AgentNode *a;
     ui_section("可选中介列表");
     for (a = g_db.agents; a; a = a->next) {
-        printf("ID:%d 姓名:%s 电话:%s\n", a->data.id, a->data.name, a->data.phone);
+        printf("ID:%d 姓名:%s 性别:%s 电话:%s\n",
+               a->data.id,
+               a->data.name,
+               a->data.gender[0] ? a->data.gender : "-",
+               a->data.phone);
     }
 }
 
@@ -1483,7 +1504,11 @@ static int collect_related_agents_for_house(int houseId, int *ids, int maxN) {
 
 /* 功能: 打印中介简要信息；输入: Agent；输出: 无 */
 static void print_agent_brief(const Agent *a) {
-    printf("  中介ID:%d 姓名:%s 电话:%s\n", a->id, a->name, a->phone);
+    printf("  中介ID:%d 姓名:%s 性别:%s 电话:%s\n",
+           a->id,
+           a->name,
+           a->gender[0] ? a->gender : "-",
+           a->phone);
 }
 
 /* 功能: 打印房源对应中介（优先历史关联）；输入: houseId；输出: 无 */
@@ -2061,6 +2086,7 @@ static void init_defaults(Database *db) {
 
     a.id = 1001;
     strcpy(a.name, "张中介");
+    strcpy(a.gender, "男");
     strcpy(a.phone, "13800000001");
     strcpy(a.idCard, "210102198803153216");
     password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
@@ -2078,6 +2104,7 @@ static void seed_demo_data(void) {
     if (!find_agent(1002)) {
         a.id = 1002;
         strcpy(a.name, "李楠");
+        strcpy(a.gender, "女");
         strcpy(a.phone, "13800000002");
         strcpy(a.idCard, "210103198907214536");
         password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
@@ -2086,6 +2113,7 @@ static void seed_demo_data(void) {
     if (!find_agent(1003)) {
         a.id = 1003;
         strcpy(a.name, "王凯");
+        strcpy(a.gender, "男");
         strcpy(a.phone, "13800000003");
         strcpy(a.idCard, "210104199001126258");
         password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
@@ -2094,6 +2122,7 @@ static void seed_demo_data(void) {
     if (!find_agent(1004)) {
         a.id = 1004;
         strcpy(a.name, "许大飞");
+        strcpy(a.gender, "男");
         strcpy(a.phone, "13700000001");
         strcpy(a.idCard, "210105198612083519");
         password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
@@ -2103,6 +2132,7 @@ static void seed_demo_data(void) {
     if (!find_tenant(5001)) {
         t.id = 5001;
         strcpy(t.name, "赵敏");
+        strcpy(t.gender, "女");
         strcpy(t.phone, "13911112222");
         strcpy(t.idCard, "210102199512123628");
         password_store(t.password, sizeof(t.password), "tenant01");
@@ -2111,6 +2141,7 @@ static void seed_demo_data(void) {
     if (!find_tenant(5002)) {
         t.id = 5002;
         strcpy(t.name, "钱浩");
+        strcpy(t.gender, "男");
         strcpy(t.phone, "13911113333");
         strcpy(t.idCard, "210103199804053219");
         password_store(t.password, sizeof(t.password), "tenant02");
@@ -2119,6 +2150,7 @@ static void seed_demo_data(void) {
     if (!find_tenant(5003)) {
         t.id = 5003;
         strcpy(t.name, "孙悦");
+        strcpy(t.gender, "女");
         strcpy(t.phone, "13911114444");
         strcpy(t.idCard, "21010419990316842X");
         password_store(t.password, sizeof(t.password), "tenant03");
@@ -2265,40 +2297,44 @@ static void list_agents(void) {
     ui_section("中介列表");
     
     if (width >= 108) {
-        printf("+------+----------+-------------+----------------------+\n");
+        printf("+------+----------+------+-------------+----------------------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
         print_table_cell_utf8("姓名", 8); printf(" | ");
+        print_table_cell_utf8("性别", 4); printf(" | ");
         print_table_cell_utf8("电话", 11); printf(" | ");
         print_table_cell_utf8("身份证(脱敏)", 20); printf(" |\n");
-        printf("+------+----------+-------------+----------------------+\n");
+        printf("+------+----------+------+-------------+----------------------+\n");
         for (a = g_db.agents; a; a = a->next) {
             char idBuf[16];
             mask_id_card(a->data.idCard, masked, sizeof(masked));
             snprintf(idBuf, sizeof(idBuf), "%d", a->data.id);
             printf("| "); print_table_cell_utf8(idBuf, 4); printf(" | ");
             print_table_cell_utf8(a->data.name, 8); printf(" | ");
+            print_table_cell_utf8(a->data.gender[0] ? a->data.gender : "-", 4); printf(" | ");
             print_table_cell_utf8(a->data.phone, 11); printf(" | ");
             print_table_cell_utf8(masked, 20); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+------+----------+-------------+----------------------+\n");
+        printf("+------+----------+------+-------------+----------------------+\n");
     } else if (width >= 80) {
-        printf("+------+----------+-------------+\n");
+        printf("+------+----------+------+-------------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
         print_table_cell_utf8("姓名", 8); printf(" | ");
+        print_table_cell_utf8("性别", 4); printf(" | ");
         print_table_cell_utf8("电话", 11); printf(" |\n");
-        printf("+------+----------+-------------+\n");
+        printf("+------+----------+------+-------------+\n");
         for (a = g_db.agents; a; a = a->next) {
             char idBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", a->data.id);
             printf("| "); print_table_cell_utf8(idBuf, 4); printf(" | ");
             print_table_cell_utf8(a->data.name, 8); printf(" | ");
+            print_table_cell_utf8(a->data.gender[0] ? a->data.gender : "-", 4); printf(" | ");
             print_table_cell_utf8(a->data.phone, 11); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+------+----------+-------------+\n");
+        printf("+------+----------+------+-------------+\n");
     } else {
         printf("+------+----------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
@@ -2325,40 +2361,44 @@ static void list_tenants(void) {
     ui_section("租客列表");
     
     if (width >= 100) {
-        printf("+--------+----------+-------------+----------------------+\n");
+        printf("+--------+----------+------+-------------+----------------------+\n");
         printf("| "); print_table_cell_utf8("ID", 6); printf(" | ");
         print_table_cell_utf8("姓名", 8); printf(" | ");
+        print_table_cell_utf8("性别", 4); printf(" | ");
         print_table_cell_utf8("电话", 11); printf(" | ");
         print_table_cell_utf8("身份证(脱敏)", 20); printf(" |\n");
-        printf("+--------+----------+-------------+----------------------+\n");
+        printf("+--------+----------+------+-------------+----------------------+\n");
         for (t = g_db.tenants; t; t = t->next) {
             char idBuf[16];
             mask_id_card(t->data.idCard, masked, sizeof(masked));
             snprintf(idBuf, sizeof(idBuf), "%d", t->data.id);
             printf("| "); print_table_cell_utf8(idBuf, 6); printf(" | ");
             print_table_cell_utf8(t->data.name, 8); printf(" | ");
+            print_table_cell_utf8(t->data.gender[0] ? t->data.gender : "-", 4); printf(" | ");
             print_table_cell_utf8(t->data.phone, 11); printf(" | ");
             print_table_cell_utf8(masked, 20); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+--------+----------+-------------+----------------------+\n");
+        printf("+--------+----------+------+-------------+----------------------+\n");
     } else if (width >= 80) {
-        printf("+--------+----------+-------------+\n");
+        printf("+--------+----------+------+-------------+\n");
         printf("| "); print_table_cell_utf8("ID", 6); printf(" | ");
         print_table_cell_utf8("姓名", 8); printf(" | ");
+        print_table_cell_utf8("性别", 4); printf(" | ");
         print_table_cell_utf8("电话", 11); printf(" |\n");
-        printf("+--------+----------+-------------+\n");
+        printf("+--------+----------+------+-------------+\n");
         for (t = g_db.tenants; t; t = t->next) {
             char idBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", t->data.id);
             printf("| "); print_table_cell_utf8(idBuf, 6); printf(" | ");
             print_table_cell_utf8(t->data.name, 8); printf(" | ");
+            print_table_cell_utf8(t->data.gender[0] ? t->data.gender : "-", 4); printf(" | ");
             print_table_cell_utf8(t->data.phone, 11); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+--------+----------+-------------+\n");
+        printf("+--------+----------+------+-------------+\n");
     } else {
         printf("+--------+----------+\n");
         printf("| "); print_table_cell_utf8("ID", 6); printf(" | ");
@@ -2584,6 +2624,7 @@ static void add_agent_item(void) {
         return;
     }
     input_non_empty("姓名: ", a.name, sizeof(a.name));
+    input_gender(a.gender, sizeof(a.gender));
     while (1) {
         input_non_empty("电话: ", a.phone, sizeof(a.phone));
         if (!validate_phone(a.phone)) {
@@ -2638,8 +2679,11 @@ static AgentNode *locate_agent_interactively(void) {
         input_non_empty("姓名: ", name, sizeof(name));
         for (cur = g_db.agents; cur; cur = cur->next) {
             if (str_eq_trimmed(cur->data.name, name)) {
-                printf("  ID:%-6d 姓名:%-16s 电话:%s\n",
-                       cur->data.id, cur->data.name, cur->data.phone);
+                printf("  ID:%-6d 姓名:%-16s 性别:%s 电话:%s\n",
+                       cur->data.id,
+                       cur->data.name,
+                       cur->data.gender[0] ? cur->data.gender : "-",
+                       cur->data.phone);
                 cnt++;
             }
         }
@@ -2684,7 +2728,11 @@ static void delete_agent_item(void) {
     int linked = 0;
     int srcId;
     if (!a) return;
-    printf("目标中介: ID:%d 姓名:%s 电话:%s\n", a->data.id, a->data.name, a->data.phone);
+        printf("目标中介: ID:%d 姓名:%s 性别:%s 电话:%s\n",
+            a->data.id,
+            a->data.name,
+            a->data.gender[0] ? a->data.gender : "-",
+            a->data.phone);
     srcId = a->data.id;
     for (v = g_db.viewings; v; v = v->next) if (v->data.agentId == srcId) linked = 1;
     for (r = g_db.rentals; r; r = r->next) if (r->data.agentId == srcId) linked = 1;
@@ -2714,12 +2762,29 @@ static void update_agent_item(void) {
     char masked[32];
     if (!a) return;
     mask_id_card(a->data.idCard, masked, sizeof(masked));
-    printf("当前: ID:%d 姓名:%s 电话:%s 身份证:%s\n", a->data.id, a->data.name, a->data.phone, masked);
+        printf("当前: ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+            a->data.id,
+            a->data.name,
+            a->data.gender[0] ? a->data.gender : "-",
+            a->data.phone,
+            masked);
     printf("新姓名(回车保持): ");
     read_line(buf, sizeof(buf));
     if (buf[0]) {
         strncpy(a->data.name, buf, sizeof(a->data.name) - 1);
         a->data.name[sizeof(a->data.name) - 1] = '\0';
+    }
+    while (1) {
+        printf("新性别(男/女，回车保持): ");
+        read_line(buf, sizeof(buf));
+        if (!buf[0]) break;
+        if (!validate_gender(buf)) {
+            printf("性别输入无效，请输入 男 或 女。\n");
+            continue;
+        }
+        strncpy(a->data.gender, buf, sizeof(a->data.gender) - 1);
+        a->data.gender[sizeof(a->data.gender) - 1] = '\0';
+        break;
     }
     while (1) {
         printf("新电话(回车保持): ");
@@ -2757,8 +2822,10 @@ static void update_agent_item(void) {
 
 /* 功能: 查询中介信息（精确/模糊/综合）；输入: 查询条件；输出: 无 */
 static void query_agent_items(void) {
-    printf("查询属性: 1.ID  2.姓名关键字  3.全部  4.综合关键字(姓名/电话/身份证/ID)\n");
-    int mode = input_int("请选择查询属性编号: ", 1, 4);
+    AgentNode *a;
+    int cnt = 0;
+    printf("查询属性: 1.ID  2.姓名关键字  3.性别  4.全部  5.综合关键字(姓名/性别/电话/身份证/ID)\n");
+    int mode = input_int("请选择查询属性编号: ", 1, 5);
     if (mode == 1) {
         int id = input_int("中介ID: ", 1000, 4999);
         AgentNode *a = find_agent(id);
@@ -2766,33 +2833,61 @@ static void query_agent_items(void) {
         else {
             char masked[32];
             mask_id_card(a->data.idCard, masked, sizeof(masked));
-            printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", a->data.id, a->data.name, a->data.phone, masked);
+            printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                   a->data.id,
+                   a->data.name,
+                   a->data.gender[0] ? a->data.gender : "-",
+                   a->data.phone,
+                   masked);
         }
     } else if (mode == 2) {
         char kw[MAX_STR];
-        AgentNode *a;
-        int cnt = 0;
+        cnt = 0;
         input_non_empty("姓名关键字: ", kw, sizeof(kw));
         for (a = g_db.agents; a; a = a->next) {
             if (contains_case_insensitive(a->data.name, kw)) {
                 char masked[32];
                 mask_id_card(a->data.idCard, masked, sizeof(masked));
-                printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", a->data.id, a->data.name, a->data.phone, masked);
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       a->data.id,
+                       a->data.name,
+                       a->data.gender[0] ? a->data.gender : "-",
+                       a->data.phone,
+                       masked);
                 cnt++;
             }
         }
         if (!cnt) printf("未找到。\n");
     } else if (mode == 3) {
+        char gender[8];
+        input_gender(gender, sizeof(gender));
+        for (a = g_db.agents; a; a = a->next) {
+            if (!validate_gender(a->data.gender)) continue;
+            if (strcmp(a->data.gender, gender) != 0) continue;
+            {
+                char masked[32];
+                mask_id_card(a->data.idCard, masked, sizeof(masked));
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       a->data.id,
+                       a->data.name,
+                       a->data.gender,
+                       a->data.phone,
+                       masked);
+            }
+            cnt++;
+        }
+        if (!cnt) printf("未找到。\n");
+    } else if (mode == 4) {
         list_agents();
     } else {
         char kw[MAX_STR];
-        AgentNode *a;
-        int cnt = 0;
+        cnt = 0;
         input_non_empty("关键字: ", kw, sizeof(kw));
         for (a = g_db.agents; a; a = a->next) {
             char idBuf[32];
             snprintf(idBuf, sizeof(idBuf), "%d", a->data.id);
             if (!contains_case_insensitive(a->data.name, kw) &&
+                !contains_case_insensitive(a->data.gender, kw) &&
                 !contains_case_insensitive(a->data.phone, kw) &&
                 !contains_case_insensitive(a->data.idCard, kw) &&
                 !contains_case_insensitive(idBuf, kw)) {
@@ -2801,7 +2896,12 @@ static void query_agent_items(void) {
             {
                 char masked[32];
                 mask_id_card(a->data.idCard, masked, sizeof(masked));
-                printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", a->data.id, a->data.name, a->data.phone, masked);
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       a->data.id,
+                       a->data.name,
+                       a->data.gender[0] ? a->data.gender : "-",
+                       a->data.phone,
+                       masked);
             }
             cnt++;
         }
@@ -2825,8 +2925,8 @@ static void reset_agent_password_by_admin(void) {
 
 /* 功能: 查询租客信息（精确/模糊/综合）；输入: 查询条件；输出: 无 */
 static void query_tenant_items(void) {
-    printf("查询属性: 1.ID  2.姓名关键字  3.电话  4.全部  5.综合关键字(姓名/电话/身份证/ID)\n");
-    int mode = input_int("请选择查询属性编号: ", 1, 5);
+    printf("查询属性: 1.ID  2.姓名关键字  3.性别  4.电话  5.全部  6.综合关键字(姓名/性别/电话/身份证/ID)\n");
+    int mode = input_int("请选择查询属性编号: ", 1, 6);
     TenantNode *t;
     int cnt = 0;
     if (mode == 1) {
@@ -2836,7 +2936,12 @@ static void query_tenant_items(void) {
         if (!t) printf("未找到。\n");
         else {
             mask_id_card(t->data.idCard, masked, sizeof(masked));
-            printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", t->data.id, t->data.name, t->data.phone, masked);
+            printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                   t->data.id,
+                   t->data.name,
+                   t->data.gender[0] ? t->data.gender : "-",
+                   t->data.phone,
+                   masked);
         }
         return;
     }
@@ -2847,22 +2952,50 @@ static void query_tenant_items(void) {
             if (contains_case_insensitive(t->data.name, kw)) {
                 char masked[32];
                 mask_id_card(t->data.idCard, masked, sizeof(masked));
-                printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", t->data.id, t->data.name, t->data.phone, masked);
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       t->data.id,
+                       t->data.name,
+                       t->data.gender[0] ? t->data.gender : "-",
+                       t->data.phone,
+                       masked);
                 cnt++;
             }
         }
     } else if (mode == 3) {
+        char gender[8];
+        input_gender(gender, sizeof(gender));
+        for (t = g_db.tenants; t; t = t->next) {
+            if (!validate_gender(t->data.gender)) continue;
+            if (strcmp(t->data.gender, gender) != 0) continue;
+            {
+                char masked[32];
+                mask_id_card(t->data.idCard, masked, sizeof(masked));
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       t->data.id,
+                       t->data.name,
+                       t->data.gender,
+                       t->data.phone,
+                       masked);
+            }
+            cnt++;
+        }
+    } else if (mode == 4) {
         char phone[20];
         input_non_empty("电话: ", phone, sizeof(phone));
         for (t = g_db.tenants; t; t = t->next) {
             if (strcmp(t->data.phone, phone) == 0) {
                 char masked[32];
                 mask_id_card(t->data.idCard, masked, sizeof(masked));
-                printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", t->data.id, t->data.name, t->data.phone, masked);
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       t->data.id,
+                       t->data.name,
+                       t->data.gender[0] ? t->data.gender : "-",
+                       t->data.phone,
+                       masked);
                 cnt++;
             }
         }
-    } else if (mode == 4) {
+    } else if (mode == 5) {
         list_tenants();
         return;
     } else {
@@ -2872,6 +3005,7 @@ static void query_tenant_items(void) {
             char idBuf[32];
             snprintf(idBuf, sizeof(idBuf), "%d", t->data.id);
             if (!contains_case_insensitive(t->data.name, kw) &&
+                !contains_case_insensitive(t->data.gender, kw) &&
                 !contains_case_insensitive(t->data.phone, kw) &&
                 !contains_case_insensitive(t->data.idCard, kw) &&
                 !contains_case_insensitive(idBuf, kw)) {
@@ -2880,7 +3014,12 @@ static void query_tenant_items(void) {
             {
                 char masked[32];
                 mask_id_card(t->data.idCard, masked, sizeof(masked));
-                printf("ID:%d 姓名:%s 电话:%s 身份证:%s\n", t->data.id, t->data.name, t->data.phone, masked);
+                printf("ID:%d 姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                       t->data.id,
+                       t->data.name,
+                       t->data.gender[0] ? t->data.gender : "-",
+                       t->data.phone,
+                       masked);
             }
             cnt++;
         }
@@ -2897,12 +3036,24 @@ static void update_tenant_item(void) {
         printf("租客不存在。\n");
         return;
     }
-    printf("当前姓名:%s 电话:%s\n", t->data.name, t->data.phone);
+    printf("当前姓名:%s 性别:%s 电话:%s\n", t->data.name, t->data.gender[0] ? t->data.gender : "-", t->data.phone);
     printf("新姓名(回车保持): ");
     read_line(buf, sizeof(buf));
     if (buf[0]) {
         strncpy(t->data.name, buf, sizeof(t->data.name) - 1);
         t->data.name[sizeof(t->data.name) - 1] = '\0';
+    }
+    while (1) {
+        printf("新性别(男/女，回车保持): ");
+        read_line(buf, sizeof(buf));
+        if (!buf[0]) break;
+        if (!validate_gender(buf)) {
+            printf("性别输入无效，请输入 男 或 女。\n");
+            continue;
+        }
+        strncpy(t->data.gender, buf, sizeof(t->data.gender) - 1);
+        t->data.gender[sizeof(t->data.gender) - 1] = '\0';
+        break;
     }
     while (1) {
         printf("新电话(回车保持): ");
@@ -3500,8 +3651,8 @@ static void delete_viewing_for_agent(int agentId) {
 
 /* 功能: 中介查询预约（多条件）；输入: agentId；输出: 无 */
 static void query_agent_viewings(int agentId) {
-    printf("查询属性: 1.看房ID  2.租客ID  3.房源ID  4.状态  5.时间范围  6.全部  7.关键字模糊\n");
-    int mode = input_int("请选择查询属性编号: ", 1, 7);
+    printf("查询属性: 1.看房ID  2.租客ID  3.房源ID  4.状态  5.时间范围  6.全部  7.关键字模糊  8.租客性别\n");
+    int mode = input_int("请选择查询属性编号: ", 1, 8);
     ViewingNode *v;
     int cnt = 0;
     if (mode == 1) {
@@ -3565,7 +3716,7 @@ static void query_agent_viewings(int agentId) {
     } else if (mode == 6) {
         list_agent_viewings(agentId);
         return;
-    } else {
+    } else if (mode == 7) {
         char kw[MAX_STR];
         input_non_empty("关键字(时间/反馈/状态/ID): ", kw, sizeof(kw));
         for (v = g_db.viewings; v; v = v->next) {
@@ -3588,14 +3739,26 @@ static void query_agent_viewings(int agentId) {
             print_viewing_detailed(&v->data);
             cnt++;
         }
+    } else {
+        char gender[8];
+        input_gender(gender, sizeof(gender));
+        for (v = g_db.viewings; v; v = v->next) {
+            TenantNode *t;
+            if (v->data.agentId != agentId) continue;
+            t = find_tenant(v->data.tenantId);
+            if (!t || !validate_gender(t->data.gender)) continue;
+            if (strcmp(t->data.gender, gender) != 0) continue;
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
     }
     if (!cnt) printf("未找到。\n");
 }
 
 /* 功能: 中介查询租约（多条件）；输入: agentId；输出: 无 */
 static void query_agent_rentals(int agentId) {
-    printf("查询属性: 1.租约ID  2.租客ID  3.房源ID  4.履约状态  5.合同日期范围  6.全部  7.关键字模糊  8.签约状态\n");
-    int mode = input_int("请选择查询属性编号: ", 1, 8);
+    printf("查询属性: 1.租约ID  2.租客ID  3.房源ID  4.履约状态  5.合同日期范围  6.全部  7.关键字模糊  8.签约状态  9.租客性别\n");
+    int mode = input_int("请选择查询属性编号: ", 1, 9);
     RentalNode *r;
     int cnt = 0;
     if (mode == 1) {
@@ -3687,7 +3850,7 @@ static void query_agent_rentals(int agentId) {
             print_rental_detailed(&r->data);
             cnt++;
         }
-    } else {
+    } else if (mode == 8) {
         printf("签约状态可选: 0.待签  1.已签  2.拒签  3.撤销\n");
         int signSt = input_int("请选择签约状态编号: ", 0, 3);
         for (r = g_db.rentals; r; r = r->next) {
@@ -3695,6 +3858,18 @@ static void query_agent_rentals(int agentId) {
                 print_rental_detailed(&r->data);
                 cnt++;
             }
+        }
+    } else {
+        char gender[8];
+        input_gender(gender, sizeof(gender));
+        for (r = g_db.rentals; r; r = r->next) {
+            TenantNode *t;
+            if (r->data.agentId != agentId) continue;
+            t = find_tenant(r->data.tenantId);
+            if (!t || !validate_gender(t->data.gender)) continue;
+            if (strcmp(t->data.gender, gender) != 0) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
         }
     }
     if (!cnt) printf("未找到。\n");
@@ -4108,8 +4283,8 @@ static void process_pending_rentals_for_tenant(int tenantId) {
 
 /* 功能: 租客查询租约（多条件）；输入: tenantId；输出: 无 */
 static void query_tenant_rentals(int tenantId) {
-    printf("查询属性: 1.租约ID  2.房源ID  3.履约状态  4.合同日期范围  5.全部  6.关键字模糊  7.签约状态\n");
-    int mode = input_int("请选择查询属性编号: ", 1, 7);
+    printf("查询属性: 1.租约ID  2.房源ID  3.履约状态  4.合同日期范围  5.全部  6.关键字模糊  7.签约状态  8.中介性别\n");
+    int mode = input_int("请选择查询属性编号: ", 1, 8);
     RentalNode *r;
     int cnt = 0;
     if (mode == 1) {
@@ -4187,7 +4362,7 @@ static void query_tenant_rentals(int tenantId) {
             print_rental_detailed(&r->data);
             cnt++;
         }
-    } else {
+    } else if (mode == 7) {
         printf("签约状态可选: 0.待签  1.已签  2.拒签  3.撤销\n");
         int signSt = input_int("请选择签约状态编号: ", 0, 3);
         for (r = g_db.rentals; r; r = r->next) {
@@ -4195,6 +4370,18 @@ static void query_tenant_rentals(int tenantId) {
                 print_rental_detailed(&r->data);
                 cnt++;
             }
+        }
+    } else {
+        char gender[8];
+        input_gender(gender, sizeof(gender));
+        for (r = g_db.rentals; r; r = r->next) {
+            AgentNode *a;
+            if (r->data.tenantId != tenantId) continue;
+            a = find_agent(r->data.agentId);
+            if (!a || !validate_gender(a->data.gender)) continue;
+            if (strcmp(a->data.gender, gender) != 0) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
         }
     }
     if (!cnt) printf("未找到。\n");
@@ -4320,8 +4507,8 @@ static void list_my_viewings(int tenantId) {
 
 /* 功能: 租客查询预约（多条件）；输入: tenantId；输出: 无 */
 static void query_tenant_viewings(int tenantId) {
-    printf("查询属性: 1.看房ID  2.房源ID  3.状态  4.时间范围  5.全部(含中介回复摘要)  6.关键字模糊\n");
-    int mode = input_int("请选择查询属性编号: ", 1, 6);
+    printf("查询属性: 1.看房ID  2.房源ID  3.状态  4.时间范围  5.全部(含中介回复摘要)  6.关键字模糊  7.中介性别\n");
+    int mode = input_int("请选择查询属性编号: ", 1, 7);
     ViewingNode *v;
     int cnt = 0;
     if (mode == 1) {
@@ -4377,7 +4564,7 @@ static void query_tenant_viewings(int tenantId) {
     } else if (mode == 5) {
         list_my_viewings(tenantId);
         return;
-    } else {
+    } else if (mode == 6) {
         char kw[MAX_STR];
         input_non_empty("关键字(时间/反馈/状态/ID): ", kw, sizeof(kw));
         for (v = g_db.viewings; v; v = v->next) {
@@ -4397,6 +4584,18 @@ static void query_tenant_viewings(int tenantId) {
                 !contains_case_insensitive(agentBuf, kw)) {
                 continue;
             }
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else {
+        char gender[8];
+        input_gender(gender, sizeof(gender));
+        for (v = g_db.viewings; v; v = v->next) {
+            AgentNode *a;
+            if (v->data.tenantId != tenantId) continue;
+            a = find_agent(v->data.agentId);
+            if (!a || !validate_gender(a->data.gender)) continue;
+            if (strcmp(a->data.gender, gender) != 0) continue;
             print_viewing_detailed(&v->data);
             cnt++;
         }
@@ -5325,13 +5524,30 @@ static void tenant_menu(TenantNode *t) {
                 return;
             }
             mask_id_card(current->data.idCard, masked, sizeof(masked));
-            printf("当前姓名:%s 电话:%s 身份证:%s\n", current->data.name, current->data.phone, masked);
+            printf("当前姓名:%s 性别:%s 电话:%s 身份证:%s\n",
+                   current->data.name,
+                   current->data.gender[0] ? current->data.gender : "-",
+                   current->data.phone,
+                   masked);
             printf("新姓名(回车保持): ");
             read_line(buf, sizeof(buf));
             if (buf[0]) {
                 strncpy(current->data.name, buf, sizeof(current->data.name) - 1);
                 current->data.name[sizeof(current->data.name) - 1] = '\0';
                 profileUpdated = 1;
+            }
+            while (1) {
+                printf("新性别(男/女，回车保持): ");
+                read_line(buf, sizeof(buf));
+                if (!buf[0]) break;
+                if (!validate_gender(buf)) {
+                    printf("性别输入无效，请输入 男 或 女。\n");
+                    continue;
+                }
+                strncpy(current->data.gender, buf, sizeof(current->data.gender) - 1);
+                current->data.gender[sizeof(current->data.gender) - 1] = '\0';
+                profileUpdated = 1;
+                break;
             }
             while (1) {
                 printf("新电话(回车保持): ");
@@ -5431,6 +5647,7 @@ static void tenant_register(void) {
         return;
     }
     input_non_empty("姓名: ", t.name, sizeof(t.name));
+    input_gender(t.gender, sizeof(t.gender));
     while (1) {
         input_non_empty("电话: ", t.phone, sizeof(t.phone));
         if (!validate_phone(t.phone)) {

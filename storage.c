@@ -1,6 +1,7 @@
 /*
  * storage.c — 逐记录读写链表数据到文件
  * v4 开始使用稳定的逐字段小端序格式，避免结构体整体写入带来的填充差异
+ * v5 在中介/租客记录中新增 gender 字段
  */
 #include "storage.h"
 
@@ -10,7 +11,7 @@
 #include <string.h>
 
 #define STORAGE_MAGIC "RMS2"
-#define STORAGE_VERSION 4
+#define STORAGE_VERSION 5
 
 typedef struct {
     /* 旧版中介ID */
@@ -22,6 +23,14 @@ typedef struct {
     /* 旧版中介密码 */
     char password[32];
 } LegacyAgent;
+
+typedef struct {
+    int id;
+    char name[MAX_STR];
+    char phone[20];
+    char idCard[20];
+    char password[32];
+} LegacyTenantV3;
 
 typedef struct {
     /* 旧版租约ID */
@@ -68,6 +77,7 @@ static void sanitize_category_list(CategoryList *list) {
 static void sanitize_agent(Agent *agent) {
     if (!agent) return;
     sanitize_string_field(agent->name, sizeof(agent->name));
+    sanitize_string_field(agent->gender, sizeof(agent->gender));
     sanitize_string_field(agent->phone, sizeof(agent->phone));
     sanitize_string_field(agent->idCard, sizeof(agent->idCard));
     sanitize_string_field(agent->password, sizeof(agent->password));
@@ -76,6 +86,7 @@ static void sanitize_agent(Agent *agent) {
 static void sanitize_tenant(Tenant *tenant) {
     if (!tenant) return;
     sanitize_string_field(tenant->name, sizeof(tenant->name));
+    sanitize_string_field(tenant->gender, sizeof(tenant->gender));
     sanitize_string_field(tenant->phone, sizeof(tenant->phone));
     sanitize_string_field(tenant->idCard, sizeof(tenant->idCard));
     sanitize_string_field(tenant->password, sizeof(tenant->password));
@@ -259,11 +270,11 @@ static int read_header(FILE *fp, int *version) {
         memcpy(&nativeVersion, versionBytes, sizeof(versionBytes));
     }
     if (!decode_i32_le_bytes(versionBytes, &littleVersion)) return 0;
-    if (nativeVersion == 2 || nativeVersion == 3) {
+    if (nativeVersion == 2 || nativeVersion == 3 || nativeVersion == 4) {
         *version = nativeVersion;
         return 1;
     }
-    if (littleVersion == STORAGE_VERSION) {
+    if (littleVersion == 4 || littleVersion == STORAGE_VERSION) {
         *version = littleVersion;
         return 1;
     }
@@ -313,6 +324,7 @@ static int write_agent_record(FILE *fp, const Agent *agent) {
     if (!agent) return 0;
     if (!write_i32_le(fp, agent->id)) return 0;
     if (!write_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    if (!write_fixed_text(fp, agent->gender, sizeof(agent->gender))) return 0;
     if (!write_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
     if (!write_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
     if (!write_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
@@ -323,6 +335,18 @@ static int read_agent_record(FILE *fp, Agent *agent) {
     if (!agent) return 0;
     if (!read_i32_le(fp, &agent->id)) return 0;
     if (!read_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    if (!read_fixed_text(fp, agent->gender, sizeof(agent->gender))) return 0;
+    if (!read_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
+    if (!read_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
+    if (!read_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
+    return 1;
+}
+
+static int read_agent_record_v4(FILE *fp, Agent *agent) {
+    if (!agent) return 0;
+    if (!read_i32_le(fp, &agent->id)) return 0;
+    if (!read_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    agent->gender[0] = '\0';
     if (!read_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
     if (!read_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
     if (!read_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
@@ -333,6 +357,7 @@ static int read_agent_record_native(FILE *fp, Agent *agent) {
     if (!agent) return 0;
     READ_FIELD(fp, &agent->id, sizeof(agent->id));
     if (!read_fixed_text(fp, agent->name, sizeof(agent->name))) return 0;
+    agent->gender[0] = '\0';
     if (!read_fixed_text(fp, agent->phone, sizeof(agent->phone))) return 0;
     if (!read_fixed_text(fp, agent->idCard, sizeof(agent->idCard))) return 0;
     if (!read_fixed_text(fp, agent->password, sizeof(agent->password))) return 0;
@@ -343,6 +368,7 @@ static int write_tenant_record(FILE *fp, const Tenant *tenant) {
     if (!tenant) return 0;
     if (!write_i32_le(fp, tenant->id)) return 0;
     if (!write_fixed_text(fp, tenant->name, sizeof(tenant->name))) return 0;
+    if (!write_fixed_text(fp, tenant->gender, sizeof(tenant->gender))) return 0;
     if (!write_fixed_text(fp, tenant->phone, sizeof(tenant->phone))) return 0;
     if (!write_fixed_text(fp, tenant->idCard, sizeof(tenant->idCard))) return 0;
     if (!write_fixed_text(fp, tenant->password, sizeof(tenant->password))) return 0;
@@ -353,6 +379,18 @@ static int read_tenant_record(FILE *fp, Tenant *tenant) {
     if (!tenant) return 0;
     if (!read_i32_le(fp, &tenant->id)) return 0;
     if (!read_fixed_text(fp, tenant->name, sizeof(tenant->name))) return 0;
+    if (!read_fixed_text(fp, tenant->gender, sizeof(tenant->gender))) return 0;
+    if (!read_fixed_text(fp, tenant->phone, sizeof(tenant->phone))) return 0;
+    if (!read_fixed_text(fp, tenant->idCard, sizeof(tenant->idCard))) return 0;
+    if (!read_fixed_text(fp, tenant->password, sizeof(tenant->password))) return 0;
+    return 1;
+}
+
+static int read_tenant_record_v4(FILE *fp, Tenant *tenant) {
+    if (!tenant) return 0;
+    if (!read_i32_le(fp, &tenant->id)) return 0;
+    if (!read_fixed_text(fp, tenant->name, sizeof(tenant->name))) return 0;
+    tenant->gender[0] = '\0';
     if (!read_fixed_text(fp, tenant->phone, sizeof(tenant->phone))) return 0;
     if (!read_fixed_text(fp, tenant->idCard, sizeof(tenant->idCard))) return 0;
     if (!read_fixed_text(fp, tenant->password, sizeof(tenant->password))) return 0;
@@ -641,6 +679,35 @@ static int load_agent_list_v4(FILE *fp, AgentNode **head, int *count) {
             free_agent_list(head);
             return 0;
         }
+        if (!read_agent_record_v4(fp, &n->data)) {
+            free(n);
+            free_agent_list(head);
+            return 0;
+        }
+        sanitize_agent(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
+static int load_agent_list_v5(FILE *fp, AgentNode **head, int *count) {
+    int i, cnt;
+    AgentNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        AgentNode *n = (AgentNode *)malloc(sizeof(AgentNode));
+        if (!n) {
+            free_agent_list(head);
+            return 0;
+        }
         if (!read_agent_record(fp, &n->data)) {
             free(n);
             free_agent_list(head);
@@ -708,6 +775,7 @@ static int load_legacy_agent_list(FILE *fp, AgentNode **head, int *count) {
         memset(&n->data, 0, sizeof(n->data));
         n->data.id = legacy.id;
         memcpy(n->data.name, legacy.name, sizeof(legacy.name));
+        n->data.gender[0] = '\0';
         memcpy(n->data.phone, legacy.phone, sizeof(legacy.phone));
         memcpy(n->data.password, legacy.password, sizeof(legacy.password));
         sanitize_agent(&n->data);
@@ -734,7 +802,43 @@ static int load_tenant_list_v3(FILE *fp, TenantNode **head, int *count) {
             free_tenant_list(head);
             return 0;
         }
-        if (fread(&n->data, sizeof(Tenant), 1, fp) != 1) {
+        LegacyTenantV3 legacy;
+        if (fread(&legacy, sizeof(legacy), 1, fp) != 1) {
+            free(n);
+            free_tenant_list(head);
+            return 0;
+        }
+        memset(&n->data, 0, sizeof(n->data));
+        n->data.id = legacy.id;
+        memcpy(n->data.name, legacy.name, sizeof(legacy.name));
+        memcpy(n->data.phone, legacy.phone, sizeof(legacy.phone));
+        memcpy(n->data.idCard, legacy.idCard, sizeof(legacy.idCard));
+        memcpy(n->data.password, legacy.password, sizeof(legacy.password));
+        sanitize_tenant(&n->data);
+        n->next = NULL;
+        if (!*head) *head = tail = n;
+        else {
+            tail->next = n;
+            tail = n;
+        }
+    }
+    *count = cnt;
+    return 1;
+}
+
+static int load_tenant_list_v4(FILE *fp, TenantNode **head, int *count) {
+    int i, cnt;
+    TenantNode *tail = NULL;
+    *head = NULL;
+    *count = 0;
+    if (!read_i32_le(fp, &cnt) || cnt < 0) return 0;
+    for (i = 0; i < cnt; ++i) {
+        TenantNode *n = (TenantNode *)malloc(sizeof(TenantNode));
+        if (!n) {
+            free_tenant_list(head);
+            return 0;
+        }
+        if (!read_tenant_record_v4(fp, &n->data)) {
             free(n);
             free_tenant_list(head);
             return 0;
@@ -751,7 +855,7 @@ static int load_tenant_list_v3(FILE *fp, TenantNode **head, int *count) {
     return 1;
 }
 
-static int load_tenant_list_v4(FILE *fp, TenantNode **head, int *count) {
+static int load_tenant_list_v5(FILE *fp, TenantNode **head, int *count) {
     int i, cnt;
     TenantNode *tail = NULL;
     *head = NULL;
@@ -1010,7 +1114,7 @@ int storage_load(const char *filename, Database *db) {
     memset(&tmp, 0, sizeof(tmp));
 
     if (read_header(fp, &version)) {
-        if (version != 2 && version != 3 && version != STORAGE_VERSION) {
+        if (version != 2 && version != 3 && version != 4 && version != STORAGE_VERSION) {
             fclose(fp);
             return 0;
         }
@@ -1024,7 +1128,7 @@ int storage_load(const char *filename, Database *db) {
         return 0;
     }
 
-    if (version >= STORAGE_VERSION) {
+    if (version >= 4) {
         if (!read_category_list_record(fp, &tmp.regions) ||
             !read_category_list_record(fp, &tmp.floorNotes) ||
             !read_category_list_record(fp, &tmp.orientations) ||
@@ -1044,18 +1148,20 @@ int storage_load(const char *filename, Database *db) {
         }
     }
 
-    if (!((version >= STORAGE_VERSION && load_agent_list_v4(fp, &tmp.agents, &tmp.agentCount)) ||
-          ((hasHeader && version < STORAGE_VERSION) && load_agent_list_v3(fp, &tmp.agents, &tmp.agentCount)) ||
+        if (!(((version >= 5) && load_agent_list_v5(fp, &tmp.agents, &tmp.agentCount)) ||
+                    ((version == 4) && load_agent_list_v4(fp, &tmp.agents, &tmp.agentCount)) ||
+                    ((hasHeader && version < 4) && load_agent_list_v3(fp, &tmp.agents, &tmp.agentCount)) ||
           (!hasHeader && load_legacy_agent_list(fp, &tmp.agents, &tmp.agentCount))) ||
-        !((version >= STORAGE_VERSION && load_tenant_list_v4(fp, &tmp.tenants, &tmp.tenantCount)) ||
-          (version < STORAGE_VERSION && load_tenant_list_v3(fp, &tmp.tenants, &tmp.tenantCount))) ||
-        !((version >= STORAGE_VERSION && load_house_list_v4(fp, &tmp.houses, &tmp.houseCount)) ||
-          (version < STORAGE_VERSION && load_house_list_v3(fp, &tmp.houses, &tmp.houseCount))) ||
-        !((version >= STORAGE_VERSION && load_viewing_list_v4(fp, &tmp.viewings, &tmp.viewingCount)) ||
-          (version < STORAGE_VERSION && load_viewing_list_v3(fp, &tmp.viewings, &tmp.viewingCount))) ||
+                !(((version >= 5) && load_tenant_list_v5(fp, &tmp.tenants, &tmp.tenantCount)) ||
+                    ((version == 4) && load_tenant_list_v4(fp, &tmp.tenants, &tmp.tenantCount)) ||
+                    (version < 4 && load_tenant_list_v3(fp, &tmp.tenants, &tmp.tenantCount))) ||
+                !((version >= 4 && load_house_list_v4(fp, &tmp.houses, &tmp.houseCount)) ||
+                    (version < 4 && load_house_list_v3(fp, &tmp.houses, &tmp.houseCount))) ||
+                !((version >= 4 && load_viewing_list_v4(fp, &tmp.viewings, &tmp.viewingCount)) ||
+                    (version < 4 && load_viewing_list_v3(fp, &tmp.viewings, &tmp.viewingCount))) ||
         !((version == 2 && load_legacy_rental_list_v2(fp, &tmp.rentals, &tmp.rentalCount)) ||
-          (version >= STORAGE_VERSION && load_rental_list_v4(fp, &tmp.rentals, &tmp.rentalCount)) ||
-          ((version != 2 && version < STORAGE_VERSION) && load_rental_list_v3(fp, &tmp.rentals, &tmp.rentalCount)))) {
+                    (version >= 4 && load_rental_list_v4(fp, &tmp.rentals, &tmp.rentalCount)) ||
+                    ((version != 2 && version < 4) && load_rental_list_v3(fp, &tmp.rentals, &tmp.rentalCount)))) {
         free_loaded_lists(&tmp);
         fclose(fp);
         return 0;
