@@ -4,8 +4,10 @@
 #include <stdio.h>
 #include "platform_compat.h"
 
+/* 分页显示时每页展示条数 */
 #define UI_PAGE_SIZE 10
 
+/* ANSI 颜色码定义（终端支持时生效） */
 #define UI_COLOR_RESET  "\x1b[0m"
 #define UI_COLOR_RED    "\x1b[31m"
 #define UI_COLOR_GREEN  "\x1b[32m"
@@ -13,13 +15,24 @@
 #define UI_COLOR_BLUE   "\x1b[34m"
 #define UI_COLOR_CYAN   "\x1b[36m"
 
+/* 是否启用彩色输出: 1 启用，0 关闭 */
 static int g_ui_color_enabled = 1;
 
+/*
+ * 功能: 初始化 UI 子系统（UTF-8 + 颜色能力）
+ * 输入: 无
+ * 输出: 无
+ */
 static inline void ui_init(void) {
     platform_setup_utf8_console();
     g_ui_color_enabled = platform_enable_virtual_terminal();
 }
 
+/*
+ * 功能: 统一输出带颜色和前缀的一行消息
+ * 输入: color 颜色码, prefix 前缀, msg 消息文本
+ * 输出: 无
+ */
 static inline void ui_color_print(const char *color, const char *prefix, const char *msg) {
     if (color && g_ui_color_enabled) printf("%s", color);
     if (prefix) printf("%s", prefix);
@@ -33,6 +46,11 @@ static inline void ui_success(const char *msg) { ui_color_print(UI_COLOR_GREEN, 
 static inline void ui_warn(const char *msg) { ui_color_print(UI_COLOR_YELLOW, "[WARN] ", msg); }
 static inline void ui_error(const char *msg) { ui_color_print(UI_COLOR_RED, "[ERROR] ", msg); }
 
+/*
+ * 功能: 输出由指定字符组成的一整行
+ * 输入: ch 填充字符, width 宽度
+ * 输出: 无
+ */
 static inline void ui_line(char ch, int width) {
     int i;
     for (i = 0; i < width; ++i) putchar(ch);
@@ -51,6 +69,11 @@ static inline void ui_section(const char *title) {
     ui_line('-', 56);
 }
 
+/*
+ * 功能: 分页展示时控制翻页
+ * 输入: shownCount 已展示条数
+ * 输出: 1 继续展示，0 用户选择退出
+ */
 static inline int ui_page_break_if_needed(int shownCount) {
     char cbuf[8];
     if (shownCount > 0 && shownCount % UI_PAGE_SIZE == 0) {
@@ -64,6 +87,11 @@ static inline int ui_page_break_if_needed(int shownCount) {
     return 1;
 }
 
+/*
+ * 功能: 简易加载动画
+ * 输入: message 提示文本
+ * 输出: 无
+ */
 static inline void ui_loading(const char *message) {
     int i;
     printf("%s", message);

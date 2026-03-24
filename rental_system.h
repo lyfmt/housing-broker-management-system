@@ -39,7 +39,9 @@
 
 /* ==================== 分类列表 ==================== */
 typedef struct {
+    /* 分类条目二维数组: 最多 MAX_CATEGORY_ITEMS 条，每条最长 MAX_STR-1 字符 */
     char items[MAX_CATEGORY_ITEMS][MAX_STR];
+    /* 当前有效条目数量 */
     int count;
 } CategoryList;
 
@@ -53,7 +55,9 @@ typedef struct {
 } Agent;
 
 typedef struct AgentNode {
+    /* 当前节点保存的中介数据 */
     Agent data;
+    /* 指向下一个节点 */
     struct AgentNode *next;
 } AgentNode;
 
@@ -67,7 +71,9 @@ typedef struct {
 } Tenant;
 
 typedef struct TenantNode {
+    /* 当前节点保存的租客数据 */
     Tenant data;
+    /* 指向下一个节点 */
     struct TenantNode *next;
 } TenantNode;
 
@@ -95,7 +101,9 @@ typedef struct {
 } House;
 
 typedef struct HouseNode {
+    /* 当前节点保存的房源数据 */
     House data;
+    /* 指向下一个节点 */
     struct HouseNode *next;
 } HouseNode;
 
@@ -113,7 +121,9 @@ typedef struct {
 } Viewing;
 
 typedef struct ViewingNode {
+    /* 当前节点保存的预约数据 */
     Viewing data;
+    /* 指向下一个节点 */
     struct ViewingNode *next;
 } ViewingNode;
 
@@ -132,37 +142,51 @@ typedef struct {
 } Rental;
 
 typedef struct RentalNode {
+    /* 当前节点保存的租约数据 */
     Rental data;
+    /* 指向下一个节点 */
     struct RentalNode *next;
 } RentalNode;
 
 /* ==================== 全局数据库 ==================== */
 typedef struct {
+    /* 管理员密码（程序内部可能为明文或哈希串） */
     char adminPassword[32];
 
+    /* 房源分类字典（用于录入/筛选） */
     CategoryList regions;
     CategoryList floorNotes;
     CategoryList orientations;
     CategoryList houseTypes;
     CategoryList decorations;
 
+    /* 中介链表与数量 */
     AgentNode   *agents;
     int          agentCount;
 
+    /* 租客链表与数量 */
     TenantNode  *tenants;
     int          tenantCount;
 
+    /* 房源链表与数量 */
     HouseNode   *houses;
     int          houseCount;
 
+    /* 看房预约链表与数量 */
     ViewingNode *viewings;
     int          viewingCount;
 
+    /* 租约链表与数量 */
     RentalNode  *rentals;
     int          rentalCount;
 } Database;
 
 /* ==================== 入口 ==================== */
+/*
+ * 功能: 启动租房中介管理系统主流程
+ * 输入: argv0 可执行程序路径（用于推导默认数据文件路径）
+ * 输出: 无
+ */
 void rental_system_run(const char *argv0);
 
 #endif

@@ -13,21 +13,34 @@
 #define STORAGE_VERSION 4
 
 typedef struct {
+    /* 旧版中介ID */
     int id;
+    /* 旧版中介姓名 */
     char name[MAX_STR];
+    /* 旧版中介手机号 */
     char phone[20];
+    /* 旧版中介密码 */
     char password[32];
 } LegacyAgent;
 
 typedef struct {
+    /* 旧版租约ID */
     int id;
+    /* 旧版房源ID */
     int houseId;
+    /* 旧版租客ID */
     int tenantId;
+    /* 旧版中介ID */
     int agentId;
+    /* 旧版签约日期 */
     char contractDate[11];
+    /* 旧版起租日期 */
     char startDate[11];
+    /* 旧版结束日期 */
     char endDate[11];
+    /* 旧版月租 */
     double monthlyRent;
+    /* 旧版租约状态 */
     int status;
 } LegacyRentalV2;
 
@@ -471,6 +484,11 @@ static int read_rental_record_native(FILE *fp, Rental *rental) {
  *  保存
  * ================================================================= */
 int storage_save(const char *filename, const Database *db) {
+    /*
+     * 功能: 将数据库完整序列化到二进制文件
+     * 输入: filename 输出文件路径, db 内存数据库
+     * 输出: 1 成功, 0 失败
+     */
     FILE *fp = fopen(filename, "wb");
     if (!fp || !db) return 0;
 
@@ -978,6 +996,11 @@ static int load_legacy_rental_list_v2(FILE *fp, RentalNode **head, int *count) {
 }
 
 int storage_load(const char *filename, Database *db) {
+    /*
+     * 功能: 从二进制文件加载数据库并兼容历史版本
+     * 输入: filename 输入文件路径, db 目标数据库
+     * 输出: 1 成功, 0 失败
+     */
     FILE *fp = fopen(filename, "rb");
     Database tmp;
     int version = 0;
