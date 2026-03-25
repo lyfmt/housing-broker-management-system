@@ -178,8 +178,76 @@
 在项目目录执行：
 
 ```bash
-gcc -Wall -Wextra -Wpedantic -std=c11 main.c rental_system.c storage.c -o rental_system
+gcc -Wall -Wextra -Wpedantic -std=c11 -Iinclude \
+  src/app/main.c \
+  src/core/rental_system.c src/core/storage.c \
+  src/modules/demo_data.c src/modules/bootstrap_data.c \
+  src/modules/password_utils.c src/modules/domain_utils.c \
+  src/modules/login_guard.c src/modules/data_path_utils.c \
+  -o rental_system
 ```
+
+Linux/macOS 可直接运行：
+
+```bash
+./rental_system
+```
+
+Windows (MinGW) 可执行：
+
+```bash
+gcc -Wall -Wextra -Wpedantic -std=c11 -Iinclude ^
+  src/app/main.c ^
+  src/core/rental_system.c src/core/storage.c ^
+  src/modules/demo_data.c src/modules/bootstrap_data.c ^
+  src/modules/password_utils.c src/modules/domain_utils.c ^
+  src/modules/login_guard.c src/modules/data_path_utils.c ^
+  -o rental_system.exe
+```
+
+Windows (MSVC Developer Command Prompt)：
+
+```bat
+cl /W4 /std:c11 /I include ^
+  src\app\main.c ^
+  src\core\rental_system.c src\core\storage.c ^
+  src\modules\demo_data.c src\modules\bootstrap_data.c ^
+  src\modules\password_utils.c src\modules\domain_utils.c ^
+  src\modules\login_guard.c src\modules\data_path_utils.c ^
+  /Fe:rental_system.exe
+```
+
+### CMake 构建
+
+适用于安装了 CMake 的环境：
+
+```bash
+cmake -S . -B build
+cmake --build build
+```
+
+运行可执行文件：
+
+```bash
+./build/rental_system
+```
+
+Windows 下运行：
+
+```bat
+build\rental_system.exe
+```
+
+说明：
+
+- 若环境没有 CMake，请直接使用上面的 `gcc` 全编译命令。
+- 两种方式产物等价，均可用于课程演示。
+
+### 关于 .vscode
+
+- `.vscode` 目录仅用于本地 VS Code 便捷调试与补全，不是项目构建所必需。
+- 团队成员或评审同学可不使用 VS Code，直接通过 `cmake` 或 `gcc` 命令完成编译与运行。
+- 本仓库已在 `.gitignore` 中忽略 `.vscode/`，避免将本地编辑器配置提交到版本库。
 
 ### 运行
 
@@ -198,12 +266,11 @@ gcc -Wall -Wextra -Wpedantic -std=c11 main.c rental_system.c storage.c -o rental
 
 ## 项目结构
 
-- `main.c`：程序入口
-- `rental_system.h`：核心数据结构与常量定义
-- `rental_system.c`：主要业务逻辑、菜单交互、数据操作
-- `storage.h` / `storage.c`：数据持久化与兼容加载逻辑
-- `platform_compat.h`：跨平台终端兼容处理
-- `ui_utils.h`：命令行界面辅助输出
+- `include/`：公共头文件目录
+- `src/app/main.c`：程序入口
+- `src/core/`：核心业务与存储实现
+- `src/modules/`：按功能拆分的辅助模块（演示数据、密码、校验、登录保护、路径处理）
+- `CMakeLists.txt`：CMake 构建脚本
 - `rental_data.dat`：默认业务数据文件
 
 ## 适用场景

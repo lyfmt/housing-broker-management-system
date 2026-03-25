@@ -7,12 +7,12 @@
 #include <time.h>
 #include <limits.h>
 
-#ifdef _WIN32
-#include <direct.h>
-#define getcwd _getcwd
-#endif
-
 #include "platform_compat.h"
+#include "bootstrap_data.h"
+#include "data_path_utils.h"
+#include "domain_utils.h"
+#include "login_guard.h"
+#include "password_utils.h"
 #include "rental_system.h"
 #include "storage.h"
 #include "ui_utils.h"
@@ -29,36 +29,8 @@ static Database g_db;
 /* 租客ID分配范围 */
 #define TENANT_ID_MIN 5000
 #define TENANT_ID_MAX INT_MAX
-/* 密码哈希格式配置 */
-#define PASSWORD_HASH_TAG "H$"
-#define PASSWORD_HASH_SALT_HEX_LEN 8
-#define PASSWORD_HASH_DIGEST_BYTES 10
-#define PASSWORD_HASH_DIGEST_HEX_LEN (PASSWORD_HASH_DIGEST_BYTES * 2)
-#define PASSWORD_HASH_FORMAT_LEN (2 + PASSWORD_HASH_SALT_HEX_LEN + 1 + PASSWORD_HASH_DIGEST_HEX_LEN)
-#define PASSWORD_HASH_ITERATIONS 4096
-/* 临时密码长度 */
-#define TEMP_PASSWORD_LEN 10
-
-/* 登录保护记录: 用于失败计数与临时锁定 */
-typedef struct {
-    /* 账号角色 */
-    int role;
-    /* 账号ID */
-    int id;
-    /* 连续失败次数 */
-    int failed;
-    /* 锁定到期时间（时间戳），0 表示未锁定 */
-    time_t lockedUntil;
-} LoginGuard;
-
-/* 登录保护数组: 按角色+ID记录登录失败状态 */
-static LoginGuard g_guards[1024];
-/* 当前已使用的登录保护记录数 */
-static int g_guardCount = 0;
 /* 当前数据文件绝对/相对路径 */
 static char g_data_file[512] = DEFAULT_DATA_FILE;
-/* 密码随机熵辅助计数器 */
-static unsigned int g_password_nonce = 0;
 
 /* 菜单回退上下文: 通过 longjmp 从深层输入流程快速返回 */
 typedef struct {
@@ -70,18 +42,6 @@ typedef struct {
 
 /* 当前生效的回退上下文指针 */
 static BackContext *g_back_ctx = NULL;
-
-/* SHA-256 计算上下文 */
-typedef struct {
-    /* 8 个状态寄存器 */
-    uint32_t state[8];
-    /* 已处理总长度（字节） */
-    uint64_t totalLen;
-    /* 分组缓冲区（64 字节） */
-    unsigned char buffer[64];
-    /* 缓冲区当前已用长度 */
-    size_t bufferLen;
-} Sha256Ctx;
 
 /*
  * 以下为核心内部函数声明（静态作用域）
@@ -117,382 +77,6 @@ static void add_rental_for_agent_with_viewing(int agentId, int presetViewingId);
 static void agent_contract_workbench_menu(int agentId);
 static int tenant_has_completed_viewing_without_contract(int tenantId);
 
-/*
- * 功能: 32 位无符号整数循环右移
- * 输入: value 原值, shift 移位位数
- * 输出: 右移后的新值
- */
-static uint32_t rotr32(uint32_t value, unsigned int shift) {
-    return (value >> shift) | (value << (32u - shift));
-}
-
-static void sha256_transform(Sha256Ctx *ctx, const unsigned char block[64]) {
-    static const uint32_t k[64] = {
-        0x428A2F98u, 0x71374491u, 0xB5C0FBCFu, 0xE9B5DBA5u,
-        0x3956C25Bu, 0x59F111F1u, 0x923F82A4u, 0xAB1C5ED5u,
-        0xD807AA98u, 0x12835B01u, 0x243185BEu, 0x550C7DC3u,
-        0x72BE5D74u, 0x80DEB1FEu, 0x9BDC06A7u, 0xC19BF174u,
-        0xE49B69C1u, 0xEFBE4786u, 0x0FC19DC6u, 0x240CA1CCu,
-        0x2DE92C6Fu, 0x4A7484AAu, 0x5CB0A9DCu, 0x76F988DAu,
-        0x983E5152u, 0xA831C66Du, 0xB00327C8u, 0xBF597FC7u,
-        0xC6E00BF3u, 0xD5A79147u, 0x06CA6351u, 0x14292967u,
-        0x27B70A85u, 0x2E1B2138u, 0x4D2C6DFCu, 0x53380D13u,
-        0x650A7354u, 0x766A0ABBu, 0x81C2C92Eu, 0x92722C85u,
-        0xA2BFE8A1u, 0xA81A664Bu, 0xC24B8B70u, 0xC76C51A3u,
-        0xD192E819u, 0xD6990624u, 0xF40E3585u, 0x106AA070u,
-        0x19A4C116u, 0x1E376C08u, 0x2748774Cu, 0x34B0BCB5u,
-        0x391C0CB3u, 0x4ED8AA4Au, 0x5B9CCA4Fu, 0x682E6FF3u,
-        0x748F82EEu, 0x78A5636Fu, 0x84C87814u, 0x8CC70208u,
-        0x90BEFFFAu, 0xA4506CEBu, 0xBEF9A3F7u, 0xC67178F2u
-    };
-    uint32_t w[64];
-    uint32_t a, b, c, d, e, f, g, h;
-    int i;
-
-    for (i = 0; i < 16; ++i) {
-        w[i] = ((uint32_t)block[i * 4] << 24)
-             | ((uint32_t)block[i * 4 + 1] << 16)
-             | ((uint32_t)block[i * 4 + 2] << 8)
-             | (uint32_t)block[i * 4 + 3];
-    }
-    for (i = 16; i < 64; ++i) {
-        uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-    }
-
-    a = ctx->state[0];
-    b = ctx->state[1];
-    c = ctx->state[2];
-    d = ctx->state[3];
-    e = ctx->state[4];
-    f = ctx->state[5];
-    g = ctx->state[6];
-    h = ctx->state[7];
-
-    for (i = 0; i < 64; ++i) {
-        uint32_t s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
-        uint32_t ch = (e & f) ^ (~e & g);
-        uint32_t temp1 = h + s1 + ch + k[i] + w[i];
-        uint32_t s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        uint32_t temp2 = s0 + maj;
-
-        h = g;
-        g = f;
-        f = e;
-        e = d + temp1;
-        d = c;
-        c = b;
-        b = a;
-        a = temp1 + temp2;
-    }
-
-    ctx->state[0] += a;
-    ctx->state[1] += b;
-    ctx->state[2] += c;
-    ctx->state[3] += d;
-    ctx->state[4] += e;
-    ctx->state[5] += f;
-    ctx->state[6] += g;
-    ctx->state[7] += h;
-}
-
-/* 功能: 初始化 SHA-256 上下文；输入: ctx；输出: 无 */
-static void sha256_init(Sha256Ctx *ctx) {
-    if (!ctx) return;
-    ctx->state[0] = 0x6A09E667u;
-    ctx->state[1] = 0xBB67AE85u;
-    ctx->state[2] = 0x3C6EF372u;
-    ctx->state[3] = 0xA54FF53Au;
-    ctx->state[4] = 0x510E527Fu;
-    ctx->state[5] = 0x9B05688Cu;
-    ctx->state[6] = 0x1F83D9ABu;
-    ctx->state[7] = 0x5BE0CD19u;
-    ctx->totalLen = 0;
-    ctx->bufferLen = 0;
-}
-
-/* 功能: 增量写入 SHA-256 数据块；输入: ctx/data/len；输出: 无 */
-static void sha256_update(Sha256Ctx *ctx, const void *data, size_t len) {
-    const unsigned char *bytes = (const unsigned char *)data;
-    if (!ctx || (!bytes && len != 0)) return;
-
-    ctx->totalLen += len;
-    while (len > 0) {
-        size_t take = sizeof(ctx->buffer) - ctx->bufferLen;
-        if (take > len) take = len;
-        memcpy(ctx->buffer + ctx->bufferLen, bytes, take);
-        ctx->bufferLen += take;
-        bytes += take;
-        len -= take;
-        if (ctx->bufferLen == sizeof(ctx->buffer)) {
-            sha256_transform(ctx, ctx->buffer);
-            ctx->bufferLen = 0;
-        }
-    }
-}
-
-/* 功能: 结束 SHA-256 计算并输出摘要；输入: ctx/out[32]；输出: 无 */
-static void sha256_final(Sha256Ctx *ctx, unsigned char out[32]) {
-    uint64_t bitLen;
-    size_t i;
-
-    if (!ctx || !out) return;
-
-    ctx->buffer[ctx->bufferLen++] = 0x80u;
-    if (ctx->bufferLen > 56) {
-        while (ctx->bufferLen < 64) ctx->buffer[ctx->bufferLen++] = 0;
-        sha256_transform(ctx, ctx->buffer);
-        ctx->bufferLen = 0;
-    }
-    while (ctx->bufferLen < 56) ctx->buffer[ctx->bufferLen++] = 0;
-
-    bitLen = ctx->totalLen * 8u;
-    for (i = 0; i < 8; ++i) {
-        ctx->buffer[56 + i] = (unsigned char)((bitLen >> ((7u - i) * 8u)) & 0xFFu);
-    }
-    sha256_transform(ctx, ctx->buffer);
-
-    for (i = 0; i < 8; ++i) {
-        out[i * 4] = (unsigned char)((ctx->state[i] >> 24) & 0xFFu);
-        out[i * 4 + 1] = (unsigned char)((ctx->state[i] >> 16) & 0xFFu);
-        out[i * 4 + 2] = (unsigned char)((ctx->state[i] >> 8) & 0xFFu);
-        out[i * 4 + 3] = (unsigned char)(ctx->state[i] & 0xFFu);
-    }
-}
-
-/* 功能: 十六进制字符转数值；输入: ch；输出: 0~15，失败 -1 */
-static int hex_value(int ch) {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return -1;
-}
-
-/* 功能: 字节数组转十六进制字符串；输入: src/len/out；输出: 无 */
-static void bytes_to_hex(const unsigned char *src, size_t len, char *out) {
-    static const char digits[] = "0123456789ABCDEF";
-    size_t i;
-    if (!src || !out) return;
-    for (i = 0; i < len; ++i) {
-        out[i * 2] = digits[(src[i] >> 4) & 0x0F];
-        out[i * 2 + 1] = digits[src[i] & 0x0F];
-    }
-    out[len * 2] = '\0';
-}
-
-/* 功能: uint32 转固定长度十六进制串；输入: value/out；输出: 无 */
-static void u32_to_hex(uint32_t value, char out[PASSWORD_HASH_SALT_HEX_LEN + 1]) {
-    int i;
-    if (!out) return;
-    for (i = PASSWORD_HASH_SALT_HEX_LEN - 1; i >= 0; --i) {
-        out[i] = "0123456789ABCDEF"[value & 0x0Fu];
-        value >>= 4;
-    }
-    out[PASSWORD_HASH_SALT_HEX_LEN] = '\0';
-}
-
-/* 功能: 解析十六进制字符串到字节数组；输入: src/out/outLen；输出: 1成功/0失败 */
-static int parse_hex_bytes(const char *src, unsigned char *out, size_t outLen) {
-    size_t i;
-    if (!src || !out) return 0;
-    for (i = 0; i < outLen; ++i) {
-        int hi = hex_value((unsigned char)src[i * 2]);
-        int lo = hex_value((unsigned char)src[i * 2 + 1]);
-        if (hi < 0 || lo < 0) return 0;
-        out[i] = (unsigned char)((hi << 4) | lo);
-    }
-    return 1;
-}
-
-/* 功能: 解析固定长度十六进制到 uint32；输入: src/value；输出: 1成功/0失败 */
-static int parse_hex_u32(const char *src, uint32_t *value) {
-    int i;
-    uint32_t result = 0;
-    if (!src || !value) return 0;
-    for (i = 0; i < PASSWORD_HASH_SALT_HEX_LEN; ++i) {
-        int nibble = hex_value((unsigned char)src[i]);
-        if (nibble < 0) return 0;
-        result = (result << 4) | (uint32_t)nibble;
-    }
-    *value = result;
-    return 1;
-}
-
-/* 功能: 常量时间比较两个字节串；输入: a/b/len；输出: 1相等/0不等 */
-static int secure_bytes_equal(const unsigned char *a, const unsigned char *b, size_t len) {
-    size_t i;
-    unsigned char diff = 0;
-    if (!a || !b) return 0;
-    for (i = 0; i < len; ++i) diff |= (unsigned char)(a[i] ^ b[i]);
-    return diff == 0;
-}
-
-/* 功能: 生成密码相关随机熵；输入: 无；输出: 32位随机混合值 */
-static uint32_t next_password_entropy(void) {
-    uint32_t mix = (uint32_t)time(NULL);
-    mix ^= (uint32_t)clock();
-    mix ^= (uint32_t)rand();
-    mix ^= (uint32_t)(++g_password_nonce * 2654435761u);
-    mix ^= (uint32_t)(uintptr_t)&mix;
-    if (mix == 0) mix = 0xA5C31F27u ^ (uint32_t)g_password_nonce;
-    return mix;
-}
-
-/* 功能: 派生密码摘要（带盐 + 多轮哈希）；输入: salt/password/out；输出: 无 */
-static void derive_password_digest(uint32_t salt, const char *password, unsigned char out[PASSWORD_HASH_DIGEST_BYTES]) {
-    unsigned char digest[32];
-    unsigned char saltBytes[4];
-    Sha256Ctx ctx;
-    const char *pwd = password ? password : "";
-    size_t pwdLen = strlen(pwd);
-    int i;
-
-    saltBytes[0] = (unsigned char)((salt >> 24) & 0xFFu);
-    saltBytes[1] = (unsigned char)((salt >> 16) & 0xFFu);
-    saltBytes[2] = (unsigned char)((salt >> 8) & 0xFFu);
-    saltBytes[3] = (unsigned char)(salt & 0xFFu);
-
-    sha256_init(&ctx);
-    sha256_update(&ctx, saltBytes, sizeof(saltBytes));
-    if (pwdLen) sha256_update(&ctx, pwd, pwdLen);
-    sha256_final(&ctx, digest);
-
-    for (i = 1; i < PASSWORD_HASH_ITERATIONS; ++i) {
-        sha256_init(&ctx);
-        sha256_update(&ctx, digest, sizeof(digest));
-        sha256_update(&ctx, saltBytes, sizeof(saltBytes));
-        if (pwdLen) sha256_update(&ctx, pwd, pwdLen);
-        sha256_final(&ctx, digest);
-    }
-
-    memcpy(out, digest, PASSWORD_HASH_DIGEST_BYTES);
-    secure_zero(digest, sizeof(digest));
-    secure_zero(&ctx, sizeof(ctx));
-}
-
-/* 功能: 解析存储密码哈希串；输入: stored/salt/digest；输出: 1成功/0失败 */
-static int password_parse_hash(const char *stored, uint32_t *salt, unsigned char digest[PASSWORD_HASH_DIGEST_BYTES]) {
-    if (!stored) return 0;
-    if (strncmp(stored, PASSWORD_HASH_TAG, strlen(PASSWORD_HASH_TAG)) != 0) return 0;
-    if (strlen(stored) != PASSWORD_HASH_FORMAT_LEN) return 0;
-    if (stored[2 + PASSWORD_HASH_SALT_HEX_LEN] != '$') return 0;
-    if (!parse_hex_u32(stored + 2, salt)) return 0;
-    if (!parse_hex_bytes(stored + 3 + PASSWORD_HASH_SALT_HEX_LEN, digest, PASSWORD_HASH_DIGEST_BYTES)) return 0;
-    return 1;
-}
-
-/* 功能: 判断密码字段是否已为哈希格式；输入: stored；输出: 1是/0否 */
-static int password_is_hashed(const char *stored) {
-    uint32_t salt = 0;
-    unsigned char digest[PASSWORD_HASH_DIGEST_BYTES];
-    int ok = password_parse_hash(stored, &salt, digest);
-    secure_zero(digest, sizeof(digest));
-    return ok;
-}
-
-/* 功能: 将明文或哈希密码写入目标字段；输入: dest/size/password；输出: 无 */
-static void password_store(char *dest, size_t size, const char *password) {
-    char encoded[32];
-    char saltHex[PASSWORD_HASH_SALT_HEX_LEN + 1];
-    char digestHex[PASSWORD_HASH_DIGEST_HEX_LEN + 1];
-    unsigned char digest[PASSWORD_HASH_DIGEST_BYTES];
-    uint32_t salt;
-
-    if (!dest || size == 0) return;
-    if (!password || !password[0]) {
-        dest[0] = '\0';
-        return;
-    }
-    if (password_is_hashed(password)) {
-        strncpy(dest, password, size - 1);
-        dest[size - 1] = '\0';
-        return;
-    }
-
-    salt = next_password_entropy();
-    derive_password_digest(salt, password, digest);
-    u32_to_hex(salt, saltHex);
-    bytes_to_hex(digest, sizeof(digest), digestHex);
-    snprintf(encoded, sizeof(encoded), "%s%s$%s", PASSWORD_HASH_TAG, saltHex, digestHex);
-    strncpy(dest, encoded, size - 1);
-    dest[size - 1] = '\0';
-    secure_zero(encoded, sizeof(encoded));
-    secure_zero(digest, sizeof(digest));
-}
-
-/* 功能: 校验输入密码是否匹配存储密码；输入: stored/input；输出: 1匹配/0不匹配 */
-static int password_verify(const char *stored, const char *input) {
-    uint32_t salt = 0;
-    unsigned char expected[PASSWORD_HASH_DIGEST_BYTES];
-    unsigned char actual[PASSWORD_HASH_DIGEST_BYTES];
-
-    if (!stored || !input) return 0;
-    if (!password_parse_hash(stored, &salt, expected)) {
-        return strcmp(stored, input) == 0;
-    }
-
-    derive_password_digest(salt, input, actual);
-    if (secure_bytes_equal(expected, actual, sizeof(actual))) {
-        secure_zero(expected, sizeof(expected));
-        secure_zero(actual, sizeof(actual));
-        return 1;
-    }
-    secure_zero(expected, sizeof(expected));
-    secure_zero(actual, sizeof(actual));
-    return 0;
-}
-
-/* 功能: 将单个密码字段规范化为哈希；输入: field/size；输出: 1有变化/0无变化 */
-static int normalize_password_field(char *field, size_t size) {
-    char encoded[32];
-    if (!field || !field[0] || password_is_hashed(field)) return 0;
-    password_store(encoded, sizeof(encoded), field);
-    strncpy(field, encoded, size - 1);
-    field[size - 1] = '\0';
-    secure_zero(encoded, sizeof(encoded));
-    return 1;
-}
-
-/* 功能: 规范化数据库中的所有密码字段；输入: db；输出: 1有变化/0无变化 */
-static int normalize_database_passwords(Database *db) {
-    int changed = 0;
-    AgentNode *a;
-    TenantNode *t;
-
-    if (!db) return 0;
-    changed |= normalize_password_field(db->adminPassword, sizeof(db->adminPassword));
-    for (a = db->agents; a; a = a->next) {
-        changed |= normalize_password_field(a->data.password, sizeof(a->data.password));
-    }
-    for (t = db->tenants; t; t = t->next) {
-        changed |= normalize_password_field(t->data.password, sizeof(t->data.password));
-    }
-    return changed;
-}
-
-/* 功能: 生成临时密码；输入: out/size；输出: 无 */
-static void generate_temporary_password(char *out, size_t size) {
-    static const char alphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    size_t i;
-    size_t alphabetLen = sizeof(alphabet) - 1;
-    uint32_t entropy = 0;
-
-    if (!out || size == 0) return;
-    if (size <= TEMP_PASSWORD_LEN) {
-        out[0] = '\0';
-        return;
-    }
-
-    for (i = 0; i < TEMP_PASSWORD_LEN; ++i) {
-        if ((i % 4u) == 0) entropy = next_password_entropy();
-        out[i] = alphabet[entropy % alphabetLen];
-        entropy = (entropy / (uint32_t)alphabetLen) ^ (entropy >> 11);
-    }
-    out[TEMP_PASSWORD_LEN] = '\0';
-}
-
 /* 功能: 判断输入是否为通用返回标记；输入: s；输出: 1是/0否 */
 static int is_back_token(const char *s) {
     return s && (strcmp(s, "#") == 0 || strcmp(s, "-1") == 0);
@@ -507,114 +91,6 @@ static int is_back_hash(const char *s) {
 static void trigger_back_to_menu(void) {
     if (g_back_ctx && g_back_ctx->active) {
         longjmp(g_back_ctx->env, 1);
-    }
-}
-
-/* 功能: 判断数据文件是否存在；输入: file；输出: 1存在/0不存在 */
-static int data_file_exists(const char *file) {
-    FILE *fp;
-    if (!file || !file[0]) return 0;
-    fp = fopen(file, "rb");
-    if (!fp) return 0;
-    fclose(fp);
-    return 1;
-}
-
-/* 功能: 字符串后缀匹配；输入: s/suffix；输出: 1匹配/0不匹配 */
-static int str_ends_with(const char *s, const char *suffix) {
-    size_t sl, su;
-    if (!s || !suffix) return 0;
-    sl = strlen(s);
-    su = strlen(suffix);
-    if (su > sl) return 0;
-    return strcmp(s + sl - su, suffix) == 0;
-}
-
-/* 功能: 判断路径是否为绝对路径；输入: path；输出: 1绝对/0相对 */
-static int is_absolute_path(const char *path) {
-    if (!path || !path[0]) return 0;
-#ifdef _WIN32
-    if ((isalpha((unsigned char)path[0]) && path[1] == ':') ||
-        (path[0] == '\\' && path[1] == '\\')) {
-        return 1;
-    }
-    return 0;
-#else
-    return path[0] == '/';
-#endif
-}
-
-/* 功能: 将 g_data_file 规范为绝对路径；输入: 无；输出: 无 */
-static void resolve_data_path_to_absolute(void) {
-    char cwd[512];
-    char absolute[512];
-
-    if (is_absolute_path(g_data_file)) return;
-    if (!getcwd(cwd, sizeof(cwd))) return;
-
-    if (snprintf(absolute, sizeof(absolute), "%s%s%s", cwd, PATH_SEPARATOR, g_data_file)
-        >= (int)sizeof(absolute)) {
-        return;
-    }
-
-    strncpy(g_data_file, absolute, sizeof(g_data_file) - 1);
-    g_data_file[sizeof(g_data_file) - 1] = '\0';
-}
-
-/* 功能: 简单路径规范化（去重分隔符/清理 ./）；输入: path；输出: 无 */
-static void normalize_simple_path(char *path) {
-    char tmp[512];
-    size_t i = 0;
-    size_t j = 0;
-
-    if (!path || !path[0]) return;
-
-    while (path[i] && j + 1 < sizeof(tmp)) {
-        if ((path[i] == '/' && path[i + 1] == '.' && path[i + 2] == '/') ||
-            (path[i] == '\\' && path[i + 1] == '.' && path[i + 2] == '\\')) {
-            tmp[j++] = path[i];
-            i += 3;
-            continue;
-        }
-        if ((path[i] == '/' && path[i + 1] == '/') || (path[i] == '\\' && path[i + 1] == '\\')) {
-            tmp[j++] = path[i];
-            while (path[i + 1] == path[i]) i++;
-            i++;
-            continue;
-        }
-        tmp[j++] = path[i++];
-    }
-
-    tmp[j] = '\0';
-    strncpy(path, tmp, 511);
-    path[511] = '\0';
-}
-
-/* 功能: 将构建目录下数据路径重映射到项目默认位置；输入: 无；输出: 无 */
-static void remap_build_dir_data_path(void) {
-    const char *suffixes[] = {
-        "/build/rental_data.dat",
-        "\\build\\rental_data.dat",
-        "/build/Debug/rental_data.dat",
-        "/build/Release/rental_data.dat",
-        "/build/RelWithDebInfo/rental_data.dat",
-        "/build/MinSizeRel/rental_data.dat",
-        "\\build\\Debug\\rental_data.dat",
-        "\\build\\Release\\rental_data.dat",
-        "\\build\\RelWithDebInfo\\rental_data.dat",
-        "\\build\\MinSizeRel\\rental_data.dat"
-    };
-    int i;
-    normalize_simple_path(g_data_file);
-    for (i = 0; i < (int)(sizeof(suffixes) / sizeof(suffixes[0])); ++i) {
-        const char *suf = suffixes[i];
-        size_t gl, su;
-        if (!str_ends_with(g_data_file, suf)) continue;
-        gl = strlen(g_data_file);
-        su = strlen(suf);
-        g_data_file[gl - su] = '\0';
-        strncat(g_data_file, "/" DEFAULT_DATA_FILE, sizeof(g_data_file) - strlen(g_data_file) - 1);
-        return;
     }
 }
 
@@ -788,35 +264,6 @@ static int input_yes_no(const char *prompt) {
     }
 }
 
-/* 功能: 校验手机号格式；输入: phone；输出: 1合法/0非法 */
-static int validate_phone(const char *phone) {
-    int i;
-    int len = (int)strlen(phone);
-    if (len != 11) return 0;
-    if (phone[0] != '1') return 0;
-    for (i = 0; phone[i]; ++i) {
-        if (!isdigit((unsigned char)phone[i])) return 0;
-    }
-    return 1;
-}
-
-/* 功能: 校验身份证号格式；输入: idCard；输出: 1合法/0非法 */
-static int validate_id_card(const char *idCard) {
-    int i;
-    if ((int)strlen(idCard) != 18) return 0;
-    for (i = 0; i < 17; ++i) {
-        if (!isdigit((unsigned char)idCard[i])) return 0;
-    }
-    if (!(isdigit((unsigned char)idCard[17]) || idCard[17] == 'X' || idCard[17] == 'x')) return 0;
-    return 1;
-}
-
-/* 功能: 校验性别值；输入: gender；输出: 1合法(男/女)/0非法 */
-static int validate_gender(const char *gender) {
-    if (!gender) return 0;
-    return strcmp(gender, "男") == 0 || strcmp(gender, "女") == 0;
-}
-
 /* 功能: 读取并校验性别；输入: out/size；输出: 无 */
 static void input_gender(char *out, int size) {
     while (1) {
@@ -828,81 +275,10 @@ static void input_gender(char *out, int size) {
     }
 }
 
-/* 功能: 身份证脱敏；输入: idCard/out/outSize；输出: 无 */
-static void mask_id_card(const char *idCard, char *out, int outSize) {
-    int i;
-    if (!idCard || (int)strlen(idCard) < 8) {
-        strncpy(out, "***", (size_t)outSize - 1);
-        out[outSize - 1] = '\0';
-        return;
-    }
-    for (i = 0; i < outSize; ++i) out[i] = '\0';
-    snprintf(out, (size_t)outSize, "%.6s********%.4s", idCard, idCard + 14);
-}
-
 /* 功能: 安全清零敏感内存；输入: ptr/len；输出: 无 */
 static void secure_zero(void *ptr, size_t len) {
     volatile unsigned char *p = (volatile unsigned char *)ptr;
     while (len--) *p++ = 0;
-}
-
-/* 功能: 判断闰年；输入: 年份；输出: 1闰年/0平年 */
-static int is_leap(int y) {
-    if (y % 400 == 0) return 1;
-    if (y % 100 == 0) return 0;
-    return y % 4 == 0;
-}
-
-/* 功能: 计算某年某月天数；输入: 年/月；输出: 天数 */
-static int days_in_month(int y, int m) {
-    static const int d[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    return (m == 2 && is_leap(y)) ? 29 : d[m - 1];
-}
-
-/* 功能: 解析日期字符串 YYYY-MM-DD；输入: s/t；输出: 1成功/0失败 */
-static int parse_date(const char *s, struct tm *t) {
-    int y, m, d;
-    if (sscanf(s, "%d-%d-%d", &y, &m, &d) != 3) return 0;
-    if (y < 1970 || m < 1 || m > 12) return 0;
-    if (d < 1 || d > days_in_month(y, m)) return 0;
-    memset(t, 0, sizeof(*t));
-    t->tm_year = y - 1900;
-    t->tm_mon = m - 1;
-    t->tm_mday = d;
-    t->tm_hour = 12;
-    return 1;
-}
-
-/*
- * 功能: 解析时间字符串 YYYY-MM-DD HH:MM
- * 输入: s 时间文本, t 输出结构体
- * 输出: 1 解析成功，0 失败
- */
-static int parse_datetime(const char *s, struct tm *t) {
-    int y, m, d, hh, mm;
-    if (sscanf(s, "%d-%d-%d %d:%d", &y, &m, &d, &hh, &mm) != 5) return 0;
-    if (y < 1970 || m < 1 || m > 12) return 0;
-    if (d < 1 || d > days_in_month(y, m)) return 0;
-    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return 0;
-    memset(t, 0, sizeof(*t));
-    t->tm_year = y - 1900;
-    t->tm_mon = m - 1;
-    t->tm_mday = d;
-    t->tm_hour = hh;
-    t->tm_min = mm;
-    return 1;
-}
-
-/* 功能: 校验日期格式是否合法；输入: 日期字符串；输出: 1合法/0非法 */
-static int validate_date(const char *s) {
-    struct tm t;
-    return parse_date(s, &t);
-}
-
-/* 功能: 校验日期时间格式是否合法；输入: 日期时间字符串；输出: 1合法/0非法 */
-static int validate_datetime(const char *s) {
-    struct tm t;
-    return parse_datetime(s, &t);
 }
 
 /*
@@ -932,58 +308,12 @@ static void log_contract_action(const char *action, const char *detail) {
     fclose(fp);
 }
 
-/* 功能: 日期字符串转 time_t；输入: YYYY-MM-DD；输出: 时间戳，失败返回 -1 */
-static time_t date_to_time(const char *s) {
-    struct tm t;
-    if (!parse_date(s, &t)) return (time_t)-1;
-    return mktime(&t);
-}
-
-/* 功能: 日期时间字符串转 time_t；输入: YYYY-MM-DD HH:MM；输出: 时间戳，失败返回 -1 */
-static time_t datetime_to_time(const char *s) {
-    struct tm t;
-    if (!parse_datetime(s, &t)) return (time_t)-1;
-    return mktime(&t);
-}
-
 /* 功能: 判断预约时间是否晚于当前时刻；输入: 预约时间字符串；输出: 1是/0否 */
 static int appointment_time_is_in_future(const char *dt) {
     time_t target = datetime_to_time(dt);
     time_t now = time(NULL);
     if (target == (time_t)-1) return 0;
     return difftime(target, now) > 0.0;
-}
-
-/* 功能: 判断两个时间区间是否重叠；输入: 两段起止时间；输出: 1重叠/0不重叠 */
-static int overlaps(time_t s1, time_t e1, time_t s2, time_t e2) {
-    return !(e1 <= s2 || e2 <= s1);
-}
-
-/* 功能: 比较两个日期先后；输入: 两个 YYYY-MM-DD；输出: -1/0/1 */
-static int compare_date_str(const char *a, const char *b) {
-    time_t ta = date_to_time(a);
-    time_t tb = date_to_time(b);
-    if (ta < tb) return -1;
-    if (ta > tb) return 1;
-    return 0;
-}
-
-/* 功能: 计算两个时间区间重叠天数；输入: 区间起止时间；输出: 重叠天数 */
-static double overlap_days(time_t s1, time_t e1, time_t s2, time_t e2) {
-    time_t s = (s1 > s2) ? s1 : s2;
-    time_t e = (e1 < e2) ? e1 : e2;
-    if (e <= s) return 0.0;
-    return difftime(e, s) / 86400.0;
-}
-
-/* 功能: 计算单份租约时长（天）；输入: 租约；输出: 天数 */
-static double rental_duration_days(const Rental *r) {
-    time_t s, e;
-    if (!r) return 0.0;
-    s = date_to_time(r->startDate);
-    e = date_to_time(r->endDate);
-    if (s == (time_t)-1 || e == (time_t)-1 || e <= s) return 0.0;
-    return difftime(e, s) / 86400.0;
 }
 
 /* 功能: 读取统计日期区间；输入: start/end；输出: 1成功/0失败 */
@@ -1003,104 +333,6 @@ static int input_date_range(char start[11], char end[11]) {
         return 0;
     }
     return 1;
-}
-
-/*
- * 功能: 获取（或创建）指定账号的登录保护记录
- * 输入: role 角色, id 账号ID
- * 输出: 保护记录指针，失败返回 NULL
- */
-static LoginGuard *get_login_guard(int role, int id) {
-    int i;
-    for (i = 0; i < g_guardCount; ++i) {
-        if (g_guards[i].role == role && g_guards[i].id == id) return &g_guards[i];
-    }
-    if (g_guardCount >= (int)(sizeof(g_guards) / sizeof(g_guards[0]))) return NULL;
-    g_guards[g_guardCount].role = role;
-    g_guards[g_guardCount].id = id;
-    g_guards[g_guardCount].failed = 0;
-    g_guards[g_guardCount].lockedUntil = 0;
-    g_guardCount++;
-    return &g_guards[g_guardCount - 1];
-}
-
-/*
- * 功能: 检查账号是否处于锁定状态
- * 输入: role 角色, id 账号ID
- * 输出: 1 已锁定，0 未锁定
- */
-static int login_is_locked(int role, int id) {
-    LoginGuard *g = get_login_guard(role, id);
-    time_t now = time(NULL);
-    if (!g) return 0;
-    if (g->lockedUntil > now) {
-        long remain = (long)(g->lockedUntil - now);
-        printf("账号已锁定，剩余约%ld秒。\n", remain);
-        return 1;
-    }
-    if (g->lockedUntil != 0 && g->lockedUntil <= now) {
-        g->lockedUntil = 0;
-        g->failed = 0;
-    }
-    return 0;
-}
-
-/*
- * 功能: 基于程序路径推导默认数据文件路径
- * 输入: argv0 可执行文件路径
- * 输出: 无（写入全局 g_data_file）
- */
-static void setup_data_file_path(const char *argv0) {
-    const char *slash1;
-    const char *slash2;
-    const char *last;
-    size_t dirLen;
-    if (!argv0 || !argv0[0]) {
-        strncpy(g_data_file, DEFAULT_DATA_FILE, sizeof(g_data_file) - 1);
-        g_data_file[sizeof(g_data_file) - 1] = '\0';
-    } else {
-        slash1 = strrchr(argv0, '/');
-        slash2 = strrchr(argv0, '\\');
-        last = slash1;
-        if (!last || (slash2 && slash2 > last)) last = slash2;
-        if (!last) {
-            strncpy(g_data_file, DEFAULT_DATA_FILE, sizeof(g_data_file) - 1);
-            g_data_file[sizeof(g_data_file) - 1] = '\0';
-        } else {
-            dirLen = (size_t)(last - argv0 + 1);
-            if (dirLen + strlen(DEFAULT_DATA_FILE) >= sizeof(g_data_file)) {
-                strncpy(g_data_file, DEFAULT_DATA_FILE, sizeof(g_data_file) - 1);
-                g_data_file[sizeof(g_data_file) - 1] = '\0';
-            } else {
-                memcpy(g_data_file, argv0, dirLen);
-                g_data_file[dirLen] = '\0';
-                strncat(g_data_file, DEFAULT_DATA_FILE, sizeof(g_data_file) - strlen(g_data_file) - 1);
-            }
-        }
-    }
-
-    resolve_data_path_to_absolute();
-    remap_build_dir_data_path();
-}
-
-/* 功能: 登录失败计数并触发锁定；输入: role/id；输出: 无 */
-static void login_record_fail(int role, int id) {
-    LoginGuard *g = get_login_guard(role, id);
-    if (!g) return;
-    g->failed++;
-    if (g->failed >= MAX_LOGIN_ATTEMPTS) {
-        g->lockedUntil = time(NULL) + LOGIN_LOCK_SECONDS;
-        g->failed = 0;
-        printf("失败次数过多，账号锁定15分钟。\n");
-    }
-}
-
-/* 功能: 清空登录失败状态；输入: role/id；输出: 无 */
-static void login_record_success(int role, int id) {
-    LoginGuard *g = get_login_guard(role, id);
-    if (!g) return;
-    g->failed = 0;
-    g->lockedUntil = 0;
 }
 
 /* 功能: 按中介ID查找；输入: id；输出: 节点指针或NULL */
@@ -2154,16 +1386,6 @@ static int reload_database_for_sync(void) {
     return 1;
 }
 
-/* 功能: 分类默认项去重添加；输入: list/value；输出: 无 */
-static void category_add_default(CategoryList *list, const char *value) {
-    int i;
-    if (list->count >= MAX_CATEGORY_ITEMS) return;
-    for (i = 0; i < list->count; ++i) if (strcmp(list->items[i], value) == 0) return;
-    strncpy(list->items[list->count], value, MAX_STR - 1);
-    list->items[list->count][MAX_STR - 1] = '\0';
-    list->count++;
-}
-
 /* 功能: 打印分类列表；输入: list/title；输出: 无 */
 static void category_print(const CategoryList *list, const char *title) {
     int i;
@@ -2186,491 +1408,18 @@ static int category_pick(const CategoryList *list, const char *title, char *out)
 
 /* 功能: 初始化默认系统数据；输入: db；输出: 无 */
 static void init_defaults(Database *db) {
-    Agent a;
-    memset(db, 0, sizeof(*db));
-    password_store(db->adminPassword, sizeof(db->adminPassword), "admin123");
-
-    category_add_default(&db->regions, "浑南区");
-    category_add_default(&db->regions, "和平区");
-    category_add_default(&db->regions, "皇姑区");
-
-    category_add_default(&db->floorNotes, "低层");
-    category_add_default(&db->floorNotes, "中层");
-    category_add_default(&db->floorNotes, "高层");
-
-    category_add_default(&db->orientations, "南");
-    category_add_default(&db->orientations, "南北");
-    category_add_default(&db->orientations, "东西");
-
-    category_add_default(&db->houseTypes, "一室一卫");
-    category_add_default(&db->houseTypes, "二室一厅一卫");
-    category_add_default(&db->houseTypes, "三室一厅两卫");
-
-    category_add_default(&db->decorations, "简装");
-    category_add_default(&db->decorations, "精装");
-
-    a.id = 1001;
-    strcpy(a.name, "张中介");
-    strcpy(a.gender, "男");
-    strcpy(a.phone, "13800000001");
-    strcpy(a.idCard, "210102198803153216");
-    password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-    append_agent(&a);
+    bootstrap_init_defaults(db);
 }
 
 /* 功能: 补齐演示数据（存在则跳过）；输入: 无；输出: 无 */
 static void seed_demo_data(void) {
-    Agent a;
-    Tenant t;
-    House h;
-    Viewing v;
-    Rental r;
-
-    if (!find_agent(1002)) {
-        a.id = 1002;
-        strcpy(a.name, "李楠");
-        strcpy(a.gender, "女");
-        strcpy(a.phone, "13800000002");
-        strcpy(a.idCard, "210103198907214536");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1003)) {
-        a.id = 1003;
-        strcpy(a.name, "王凯");
-        strcpy(a.gender, "男");
-        strcpy(a.phone, "13800000003");
-        strcpy(a.idCard, "210104199001126258");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1004)) {
-        a.id = 1004;
-        strcpy(a.name, "许大飞");
-        strcpy(a.gender, "男");
-        strcpy(a.phone, "13700000001");
-        strcpy(a.idCard, "210105198612083519");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1005)) {
-        a.id = 1005;
-        strcpy(a.name, "马超");
-        strcpy(a.gender, "男");
-        strcpy(a.phone, "13700000005");
-        strcpy(a.idCard, "210106198901016257");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1006)) {
-        a.id = 1006;
-        strcpy(a.name, "司马诸葛");
-        strcpy(a.gender, "男");
-        strcpy(a.phone, "13700000006");
-        strcpy(a.idCard, "210107199002146611");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1007)) {
-        a.id = 1007;
-        strcpy(a.name, "诸葛青");
-        strcpy(a.gender, "男");
-        strcpy(a.phone, "13700000007");
-        strcpy(a.idCard, "210108199310213634");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1008)) {
-        a.id = 1008;
-        strcpy(a.name, "马岚");
-        strcpy(a.gender, "女");
-        strcpy(a.phone, "13700000008");
-        strcpy(a.idCard, "210109199504287146");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1009)) {
-        a.id = 1009;
-        strcpy(a.name, "司马云");
-        strcpy(a.gender, "女");
-        strcpy(a.phone, "13700000009");
-        strcpy(a.idCard, "210110199612036083");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-    if (!find_agent(1010)) {
-        a.id = 1010;
-        strcpy(a.name, "赵云飞");
-        strcpy(a.gender, "男");
-        strcpy(a.phone, "13700000010");
-        strcpy(a.idCard, "210111198711058575");
-        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
-        append_agent(&a);
-    }
-
-    if (!find_tenant(5001)) {
-        t.id = 5001;
-        strcpy(t.name, "赵敏");
-        strcpy(t.gender, "女");
-        strcpy(t.phone, "13911112222");
-        strcpy(t.idCard, "210102199512123628");
-        password_store(t.password, sizeof(t.password), "tenant01");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5002)) {
-        t.id = 5002;
-        strcpy(t.name, "钱浩");
-        strcpy(t.gender, "男");
-        strcpy(t.phone, "13911113333");
-        strcpy(t.idCard, "210103199804053219");
-        password_store(t.password, sizeof(t.password), "tenant02");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5003)) {
-        t.id = 5003;
-        strcpy(t.name, "孙悦");
-        strcpy(t.gender, "女");
-        strcpy(t.phone, "13911114444");
-        strcpy(t.idCard, "21010419990316842X");
-        password_store(t.password, sizeof(t.password), "tenant03");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5004)) {
-        t.id = 5004;
-        strcpy(t.name, "马超");
-        strcpy(t.gender, "男");
-        strcpy(t.phone, "13911115555");
-        strcpy(t.idCard, "210105199404179531");
-        password_store(t.password, sizeof(t.password), "tenant04");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5005)) {
-        t.id = 5005;
-        strcpy(t.name, "司马诸葛");
-        strcpy(t.gender, "男");
-        strcpy(t.phone, "13911116666");
-        strcpy(t.idCard, "210106199601225237");
-        password_store(t.password, sizeof(t.password), "tenant05");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5006)) {
-        t.id = 5006;
-        strcpy(t.name, "马小雨");
-        strcpy(t.gender, "女");
-        strcpy(t.phone, "13911117777");
-        strcpy(t.idCard, "210107199710116428");
-        password_store(t.password, sizeof(t.password), "tenant06");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5007)) {
-        t.id = 5007;
-        strcpy(t.name, "诸葛亮亮");
-        strcpy(t.gender, "男");
-        strcpy(t.phone, "13911118888");
-        strcpy(t.idCard, "210108199811092736");
-        password_store(t.password, sizeof(t.password), "tenant07");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5008)) {
-        t.id = 5008;
-        strcpy(t.name, "司马昭");
-        strcpy(t.gender, "男");
-        strcpy(t.phone, "13911119999");
-        strcpy(t.idCard, "210109199912257214");
-        password_store(t.password, sizeof(t.password), "tenant08");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5009)) {
-        t.id = 5009;
-        strcpy(t.name, "黄月英");
-        strcpy(t.gender, "女");
-        strcpy(t.phone, "13911110001");
-        strcpy(t.idCard, "210110199211306122");
-        password_store(t.password, sizeof(t.password), "tenant09");
-        append_tenant(&t);
-    }
-    if (!find_tenant(5010)) {
-        t.id = 5010;
-        strcpy(t.name, "马腾");
-        strcpy(t.gender, "男");
-        strcpy(t.phone, "13911110002");
-        strcpy(t.idCard, "210111198812018451");
-        password_store(t.password, sizeof(t.password), "tenant10");
-        append_tenant(&t);
-    }
-
-    if (!find_house(2001)) {
-        h.id = 2001;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "浑南区");
-        strcpy(h.community, "华润悦府");
-        strcpy(h.address, "浑南中路88号");
-        strcpy(h.building, "1栋");
-        h.floor = 12;
-        strcpy(h.unitNo, "1202室");
-        strcpy(h.floorNote, "中层");
-        strcpy(h.orientation, "南北");
-        strcpy(h.houseType, "二室一厅一卫");
-        h.area = 89.5;
-        strcpy(h.decoration, "精装");
-        h.price = 3200;
-        strcpy(h.ownerName, "刘先生");
-        strcpy(h.ownerPhone, "13788889999");
-        h.createdByAgentId = 1001;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2002)) {
-        h.id = 2002;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "和平区");
-        strcpy(h.community, "万科春河里");
-        strcpy(h.address, "南京南街26号");
-        strcpy(h.building, "2栋");
-        h.floor = 8;
-        strcpy(h.unitNo, "803室");
-        strcpy(h.floorNote, "中层");
-        strcpy(h.orientation, "南");
-        strcpy(h.houseType, "一室一卫");
-        h.area = 52.0;
-        strcpy(h.decoration, "简装");
-        h.price = 2100;
-        strcpy(h.ownerName, "周女士");
-        strcpy(h.ownerPhone, "13677778888");
-        h.createdByAgentId = 1002;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2003)) {
-        h.id = 2003;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "皇姑区");
-        strcpy(h.community, "保利海上五月花");
-        strcpy(h.address, "崇山路66号");
-        strcpy(h.building, "6栋");
-        h.floor = 15;
-        strcpy(h.unitNo, "1501室");
-        strcpy(h.floorNote, "高层");
-        strcpy(h.orientation, "南北");
-        strcpy(h.houseType, "三室一厅两卫");
-        h.area = 128.0;
-        strcpy(h.decoration, "精装");
-        h.price = 4500;
-        strcpy(h.ownerName, "吴先生");
-        strcpy(h.ownerPhone, "13566667777");
-        h.createdByAgentId = 1003;
-        h.status = HOUSE_RENTED;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2004)) {
-        h.id = 2004;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "和平区");
-        strcpy(h.community, "幸福小区");
-        strcpy(h.address, "中华路128号");
-        strcpy(h.building, "3栋");
-        h.floor = 10;
-        strcpy(h.unitNo, "1002室");
-        strcpy(h.floorNote, "中层");
-        strcpy(h.orientation, "南北");
-        strcpy(h.houseType, "二室一厅一卫");
-        h.area = 92.0;
-        strcpy(h.decoration, "精装");
-        h.price = 4100;
-        strcpy(h.ownerName, "陈先生");
-        strcpy(h.ownerPhone, "13612345671");
-        h.createdByAgentId = 1005;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2005)) {
-        h.id = 2005;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "浑南区");
-        strcpy(h.community, "幸福家园");
-        strcpy(h.address, "浑南东路56号");
-        strcpy(h.building, "5栋");
-        h.floor = 14;
-        strcpy(h.unitNo, "1401室");
-        strcpy(h.floorNote, "高层");
-        strcpy(h.orientation, "南");
-        strcpy(h.houseType, "二室一厅一卫");
-        h.area = 88.0;
-        strcpy(h.decoration, "精装");
-        h.price = 3950;
-        strcpy(h.ownerName, "杨女士");
-        strcpy(h.ownerPhone, "13612345672");
-        h.createdByAgentId = 1006;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2006)) {
-        h.id = 2006;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "皇姑区");
-        strcpy(h.community, "幸福里");
-        strcpy(h.address, "崇山中路30号");
-        strcpy(h.building, "2栋");
-        h.floor = 9;
-        strcpy(h.unitNo, "902室");
-        strcpy(h.floorNote, "中层");
-        strcpy(h.orientation, "南北");
-        strcpy(h.houseType, "二室一厅一卫");
-        h.area = 95.0;
-        strcpy(h.decoration, "简装");
-        h.price = 4050;
-        strcpy(h.ownerName, "刘女士");
-        strcpy(h.ownerPhone, "13612345673");
-        h.createdByAgentId = 1007;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2007)) {
-        h.id = 2007;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "和平区");
-        strcpy(h.community, "幸福雅苑");
-        strcpy(h.address, "太原街88号");
-        strcpy(h.building, "1栋");
-        h.floor = 11;
-        strcpy(h.unitNo, "1103室");
-        strcpy(h.floorNote, "中层");
-        strcpy(h.orientation, "南");
-        strcpy(h.houseType, "二室一厅一卫");
-        h.area = 86.5;
-        strcpy(h.decoration, "精装");
-        h.price = 4000;
-        strcpy(h.ownerName, "宋先生");
-        strcpy(h.ownerPhone, "13612345674");
-        h.createdByAgentId = 1008;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2008)) {
-        h.id = 2008;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "浑南区");
-        strcpy(h.community, "幸福新城");
-        strcpy(h.address, "创新路66号");
-        strcpy(h.building, "8栋");
-        h.floor = 16;
-        strcpy(h.unitNo, "1602室");
-        strcpy(h.floorNote, "高层");
-        strcpy(h.orientation, "南北");
-        strcpy(h.houseType, "三室一厅两卫");
-        h.area = 102.0;
-        strcpy(h.decoration, "精装");
-        h.price = 4300;
-        strcpy(h.ownerName, "周先生");
-        strcpy(h.ownerPhone, "13612345675");
-        h.createdByAgentId = 1009;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-    if (!find_house(2009)) {
-        h.id = 2009;
-        strcpy(h.city, "沈阳");
-        strcpy(h.region, "皇姑区");
-        strcpy(h.community, "幸福花园");
-        strcpy(h.address, "黄河南大街99号");
-        strcpy(h.building, "4栋");
-        h.floor = 7;
-        strcpy(h.unitNo, "702室");
-        strcpy(h.floorNote, "中层");
-        strcpy(h.orientation, "南");
-        strcpy(h.houseType, "二室一厅一卫");
-        h.area = 90.0;
-        strcpy(h.decoration, "简装");
-        h.price = 3900;
-        strcpy(h.ownerName, "吴女士");
-        strcpy(h.ownerPhone, "13612345676");
-        h.createdByAgentId = 1010;
-        h.status = HOUSE_VACANT;
-        h.rejectReason[0] = '\0';
-        append_house(&h);
-    }
-
-    if (!find_viewing(3001)) {
-        memset(&v, 0, sizeof(v));
-        v.id = 3001;
-        strcpy(v.datetime, "2026-03-20 14:30");
-        v.houseId = 2001;
-        v.tenantId = 5001;
-        v.agentId = 1002;
-        v.durationMinutes = 45;
-        v.status = VIEWING_CONFIRMED;
-        v.contractStatus = VIEWING_CONTRACT_NONE;
-        strcpy(v.tenantFeedback, "-");
-        strcpy(v.agentFeedback, "已电话确认");
-        append_viewing(&v);
-    }
-    if (!find_viewing(3002)) {
-        memset(&v, 0, sizeof(v));
-        v.id = 3002;
-        strcpy(v.datetime, "2026-03-22 10:00");
-        v.houseId = 2002;
-        v.tenantId = 5002;
-        v.agentId = 0;
-        v.durationMinutes = 30;
-        v.status = VIEWING_UNCONFIRMED;
-        v.contractStatus = VIEWING_CONTRACT_NONE;
-        strcpy(v.tenantFeedback, "-");
-        strcpy(v.agentFeedback, "-");
-        append_viewing(&v);
-    }
-
-    if (!find_rental(4001)) {
-        memset(&r, 0, sizeof(r));
-        r.id = 4001;
-        r.houseId = 2003;
-        r.tenantId = 5003;
-        r.agentId = 1001;
-        r.appointmentId = 0;
-        strcpy(r.contractDate, "2026-02-15");
-        strcpy(r.startDate, "2026-03-01");
-        strcpy(r.endDate, "2027-02-28");
-        r.leaseTerm = 12;
-        r.monthlyRent = 4300;
-        r.deposit = 8600;
-        r.otherTerms[0] = '\0';
-        r.rejectReason[0] = '\0';
-        r.status = RENTAL_ACTIVE;
-        r.signStatus = RENTAL_SIGN_CONFIRMED;
-        append_rental(&r);
-    }
+    bootstrap_seed_demo_data(&g_db);
     refresh_house_status(2003);
 }
 
 /* 功能: 为演示中介补齐身份证；输入: 无；输出: 1有更新/0无变化 */
 static int upgrade_demo_agent_id_cards(void) {
-    struct {
-        int id;
-        const char *idCard;
-    } defaults[] = {
-        {1001, "210102198803153216"},
-        {1002, "210103198907214536"},
-        {1003, "210104199001126258"},
-        {1004, "210105198612083519"}
-    };
-    int changed = 0;
-    int i;
-
-    for (i = 0; i < (int)(sizeof(defaults) / sizeof(defaults[0])); ++i) {
-        AgentNode *a = find_agent(defaults[i].id);
-        if (!a || a->data.idCard[0]) continue;
-        strncpy(a->data.idCard, defaults[i].idCard, sizeof(a->data.idCard) - 1);
-        a->data.idCard[sizeof(a->data.idCard) - 1] = '\0';
-        changed = 1;
-    }
-    return changed;
+    return bootstrap_upgrade_demo_agent_id_cards(&g_db);
 }
 
 static void list_agents(void) {
@@ -3314,7 +2063,7 @@ static void reset_agent_password_by_admin(void) {
         return;
     }
     password_store(a->data.password, sizeof(a->data.password), DEFAULT_AGENT_PASSWORD);
-    login_record_success(LOGIN_ROLE_AGENT, a->data.id);
+    login_guard_record_success(LOGIN_ROLE_AGENT, a->data.id);
     printf("已重置为默认密码: %s\n", DEFAULT_AGENT_PASSWORD);
     printf("请通知该中介登录后立即修改密码。\n");
 }
@@ -3496,7 +2245,7 @@ static void reset_tenant_password_by_admin(void) {
     }
     generate_temporary_password(tempPwd, sizeof(tempPwd));
     password_store(t->data.password, sizeof(t->data.password), tempPwd);
-    login_record_success(LOGIN_ROLE_TENANT, t->data.id);
+    login_guard_record_success(LOGIN_ROLE_TENANT, t->data.id);
     printf("已重置为临时密码: %s\n", tempPwd);
     printf("请通知该租客登录后立即修改密码。\n");
     secure_zero(tempPwd, sizeof(tempPwd));
@@ -5389,7 +4138,7 @@ static void change_agent_password(AgentNode *a) {
         printf("密码过短。\n");
     }
     password_store(a->data.password, sizeof(a->data.password), newPwd);
-    login_record_success(LOGIN_ROLE_AGENT, a->data.id);
+    login_guard_record_success(LOGIN_ROLE_AGENT, a->data.id);
     printf("密码修改成功。\n");
     secure_zero(oldPwd, sizeof(oldPwd));
     secure_zero(newPwd, sizeof(newPwd));
@@ -5888,7 +4637,7 @@ static void change_admin_password(void) {
         printf("密码过短。\n");
     }
     password_store(g_db.adminPassword, sizeof(g_db.adminPassword), newPwd);
-    login_record_success(LOGIN_ROLE_ADMIN, 0);
+    login_guard_record_success(LOGIN_ROLE_ADMIN, 0);
     printf("管理员密码修改成功。\n");
     secure_zero(oldPwd, sizeof(oldPwd));
     secure_zero(newPwd, sizeof(newPwd));
@@ -6333,7 +5082,7 @@ static void tenant_menu(TenantNode *t) {
                         printf("密码过短。\n");
                     }
                     password_store(current->data.password, sizeof(current->data.password), newPwd);
-                    login_record_success(LOGIN_ROLE_TENANT, current->data.id);
+                    login_guard_record_success(LOGIN_ROLE_TENANT, current->data.id);
                     needSave = 1;
                     secure_zero(newPwd, sizeof(newPwd));
                 }
@@ -6357,20 +5106,19 @@ static void tenant_menu(TenantNode *t) {
 /* 功能: 统一密码校验与锁定控制；输入: 真实密码哈希/角色/账号ID；输出: 1通过/0失败 */
 static int login_password_check(const char *realPwd, int role, int accountId) {
     char pwd[32];
-    if (login_is_locked(role, accountId)) return 0;
+    if (login_guard_is_locked(role, accountId)) return 0;
     while (1) {
         input_non_empty("密码: ", pwd, sizeof(pwd));
         if (password_verify(realPwd, pwd)) {
-            login_record_success(role, accountId);
+            login_guard_record_success(role, accountId);
             secure_zero(pwd, sizeof(pwd));
             return 1;
         }
-        login_record_fail(role, accountId);
+        login_guard_record_fail(role, accountId, MAX_LOGIN_ATTEMPTS, LOGIN_LOCK_SECONDS);
         secure_zero(pwd, sizeof(pwd));
-        if (login_is_locked(role, accountId)) return 0;
+        if (login_guard_is_locked(role, accountId)) return 0;
         {
-            LoginGuard *g = get_login_guard(role, accountId);
-            int remain = g ? (MAX_LOGIN_ATTEMPTS - g->failed) : 0;
+            int remain = login_guard_remaining_attempts(role, accountId, MAX_LOGIN_ATTEMPTS);
             printf("密码错误，剩余次数:%d\n", remain);
         }
     }
@@ -6525,7 +5273,7 @@ static void recover_admin_password(void) {
         break;
     }
     password_store(g_db.adminPassword, sizeof(g_db.adminPassword), newPwd);
-    login_record_success(LOGIN_ROLE_ADMIN, 0);
+    login_guard_record_success(LOGIN_ROLE_ADMIN, 0);
     autosave_default();
     printf("管理员密码找回成功，请使用新密码登录。\n");
     secure_zero(inputKey, sizeof(inputKey));
@@ -6585,7 +5333,7 @@ static void recover_agent_password(void) {
         break;
     }
     password_store(a->data.password, sizeof(a->data.password), newPwd);
-    login_record_success(LOGIN_ROLE_AGENT, a->data.id);
+    login_guard_record_success(LOGIN_ROLE_AGENT, a->data.id);
     autosave_default();
     printf("校验通过，密码已重置成功。\n");
     printf("请使用新密码登录。\n");
@@ -6663,7 +5411,7 @@ static void recover_tenant_password(void) {
         break;
     }
     password_store(t->data.password, sizeof(t->data.password), newPwd);
-    login_record_success(LOGIN_ROLE_TENANT, t->data.id);
+    login_guard_record_success(LOGIN_ROLE_TENANT, t->data.id);
     autosave_default();
     printf("校验通过，密码已重置成功。\n");
     printf("请使用新密码登录。\n");
@@ -6734,12 +5482,12 @@ void rental_system_run(const char *argv0) {
     int upgraded = 0;
     ui_init();
     srand((unsigned int)time(NULL));
-    setup_data_file_path(argv0);
+    data_path_setup_from_argv(g_data_file, sizeof(g_data_file), argv0, DEFAULT_DATA_FILE);
     memset(&g_db, 0, sizeof(g_db));
-    if (data_file_exists(g_data_file) && !load_from_file(g_data_file)) {
+    if (data_path_file_exists(g_data_file) && !load_from_file(g_data_file)) {
         init_defaults(&g_db);
         save_to_file(g_data_file);
-    } else if (!data_file_exists(g_data_file)) {
+    } else if (!data_path_file_exists(g_data_file)) {
         init_defaults(&g_db);
         save_to_file(g_data_file);
     }
