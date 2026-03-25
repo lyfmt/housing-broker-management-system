@@ -77,6 +77,13 @@ static void add_rental_for_agent_with_viewing(int agentId, int presetViewingId);
 static void agent_contract_workbench_menu(int agentId);
 static int tenant_has_completed_viewing_without_contract(int tenantId);
 
+/* 功能: 判断中介ID是否已在数组中；输入: ids/n/id；输出: 1存在/0不存在 */
+static int id_in_list(const int *ids, int n, int id) {
+    int i;
+    for (i = 0; i < n; ++i) if (ids[i] == id) return 1;
+    return 0;
+}
+
 /* 功能: 判断输入是否为通用返回标记；输入: s；输出: 1是/0否 */
 static int is_back_token(const char *s) {
     return s && (strcmp(s, "#") == 0 || strcmp(s, "-1") == 0);
@@ -439,11 +446,56 @@ static const char *tenant_house_state_text(const House *h) {
     return "未知";
 }
 
-/* 功能: 打印可选中介清单；输入: 无；输出: 终端列表 */
-static void display_agents_for_selection(void) {
-    AgentNode *a;
+/* 功能: 收集房源可负责中介；输入: houseId/ids/maxN；输出: 数量 */
+static int collect_responsible_agents_for_house(int houseId, int *ids, int maxN) {
+    int n = 0;
+    int related[256];
+    int rn;
+    int i;
+    HouseNode *h = find_house(houseId);
+
+    if (!ids || maxN <= 0) return 0;
+
+    if (h && h->data.createdByAgentId > 0 && find_agent(h->data.createdByAgentId)) {
+        ids[n++] = h->data.createdByAgentId;
+    }
+
+    rn = collect_related_agents_for_house(houseId, related, 256);
+    for (i = 0; i < rn && n < maxN; ++i) {
+        if (!id_in_list(ids, n, related[i])) ids[n++] = related[i];
+    }
+    return n;
+}
+
+/* 功能: 收集某预约时段可分配中介；输入: houseId/dt/dur/ignoreId/ids/maxN；输出: 数量 */
+static int collect_available_responsible_agents_for_slot(
+    int houseId,
+    const char *dt,
+    int dur,
+    int ignoreId,
+    int *ids,
+    int maxN
+) {
+    int related[256];
+    int i, n, out = 0;
+    if (!ids || maxN <= 0) return 0;
+    n = collect_responsible_agents_for_house(houseId, related, 256);
+    for (i = 0; i < n && out < maxN; ++i) {
+        int aid = related[i];
+        if (!find_agent(aid)) continue;
+        if (viewing_conflict(dt, dur, houseId, aid, ignoreId)) continue;
+        ids[out++] = aid;
+    }
+    return out;
+}
+
+/* 功能: 打印可选中介清单；输入: ids/n；输出: 终端列表 */
+static void display_agents_for_selection(const int *ids, int n) {
+    int i;
     ui_section("可选中介列表");
-    for (a = g_db.agents; a; a = a->next) {
+    for (i = 0; i < n; ++i) {
+        AgentNode *a = find_agent(ids[i]);
+        if (!a) continue;
         printf("ID:%d 姓名:%s 性别:%s 电话:%s\n",
                a->data.id,
                a->data.name,
@@ -539,21 +591,6 @@ static void collect_community_choices(CategoryList *out) {
     }
 }
 
-/* 功能: 为房源分配中介；输入: house；输出: 中介ID，0表示失败 */
-static int company_assign_agent_for_house(const House *house) {
-    int related[256];
-    int n;
-    if (house && house->createdByAgentId > 0 && find_agent(house->createdByAgentId)) {
-        return house->createdByAgentId;
-    }
-    if (house) {
-        n = collect_related_agents_for_house(house->id, related, 256);
-        if (n > 0) return related[0];
-    }
-    if (g_db.agents) return g_db.agents->data.id;
-    return 0;
-}
-
 /*
  * 功能: 租客发起看房预约
  * 输入: tenantId 租客ID, houseId 房源ID
@@ -561,7 +598,6 @@ static int company_assign_agent_for_house(const House *house) {
  */
 static void make_appointment_for_tenant(int tenantId, int houseId) {
     HouseNode *h;
-    AgentNode *assigned;
     Viewing v;
 
     if (tenantId <= 0) return;
@@ -603,29 +639,31 @@ static void make_appointment_for_tenant(int tenantId, int houseId) {
     {
         int mode = input_int("预约中介方式 1指定中介 2公司分配: ", 1, 2);
         if (mode == 1) {
+            int selectable[256];
+            int n;
             int aid;
-            if (!g_db.agents) {
-                printf("当前无可用中介，无法指定。\n");
+            n = collect_available_responsible_agents_for_slot(
+                v.houseId,
+                v.datetime,
+                v.durationMinutes,
+                -1,
+                selectable,
+                256
+            );
+            if (n <= 0) {
+                printf("该房源在当前预约时段无可指定中介（需负责该房源且时间可用）。\n");
                 return;
             }
-            display_agents_for_selection();
+            display_agents_for_selection(selectable, n);
             aid = input_int("输入中介ID: ", 1000, 4999);
-            if (!find_agent(aid)) {
-                printf("中介不存在。\n");
+            if (!id_in_list(selectable, n, aid)) {
+                printf("该中介不在可选列表中。\n");
                 return;
             }
             v.agentId = aid;
         } else {
-            v.agentId = company_assign_agent_for_house(&h->data);
-            if (v.agentId == 0) {
-                printf("公司分配失败：当前无可用中介。\n");
-                return;
-            }
-            assigned = find_agent(v.agentId);
-            if (assigned) {
-                printf("系统已分配中介: ID:%d 姓名:%s 电话:%s\n",
-                       assigned->data.id, assigned->data.name, assigned->data.phone);
-            }
+            v.agentId = 0;
+            printf("已提交公司分配，等待管理员登录后手动分配中介。\n");
         }
     }
 
@@ -643,7 +681,8 @@ static void make_appointment_for_tenant(int tenantId, int houseId) {
         return;
     }
     autosave_default();
-    printf("预约成功(预约ID:%d)，等待中介处理。\n", v.id);
+    if (v.agentId == 0) printf("预约成功(预约ID:%d)，等待管理员分配中介。\n", v.id);
+    else printf("预约成功(预约ID:%d)，等待中介处理。\n", v.id);
 }
 
 /* 功能: 租客多条件查询房源并可直接预约；输入: tenantId；输出: 无 */
@@ -740,6 +779,47 @@ static void search_houses_for_tenant(int tenantId) {
     }
 }
 
+/* 功能: 判断反馈是否为占位值；输入: s；输出: 1是/0否 */
+static int feedback_is_placeholder(const char *s) {
+    if (!s) return 1;
+    if (!s[0]) return 1;
+    return strcmp(s, "-") == 0;
+}
+
+/* 功能: 生成租客可读的中介反馈文案；输入: Viewing/out/size；输出: 无 */
+static void build_agent_feedback_for_tenant(const Viewing *v, char *out, size_t size) {
+    if (!out || size == 0) return;
+    out[0] = '\0';
+    if (!v) return;
+
+    if (v->agentId == 0) {
+        strncpy(out, "待管理员分配中介", size - 1);
+        out[size - 1] = '\0';
+        return;
+    }
+
+    if (!feedback_is_placeholder(v->agentFeedback)) {
+        strncpy(out, v->agentFeedback, size - 1);
+        out[size - 1] = '\0';
+        return;
+    }
+
+    if (v->status == VIEWING_UNCONFIRMED) {
+        strncpy(out, "待中介处理", size - 1);
+    } else if (v->status == VIEWING_CONFIRMED) {
+        strncpy(out, "已同意(未填写备注)", size - 1);
+    } else if (v->status == VIEWING_CANCELLED) {
+        strncpy(out, "已拒绝(未填写理由)", size - 1);
+    } else if (v->status == VIEWING_COMPLETED) {
+        strncpy(out, "看房已完成", size - 1);
+    } else if (v->status == VIEWING_MISSED) {
+        strncpy(out, "未赴约", size - 1);
+    } else {
+        strncpy(out, "-", size - 1);
+    }
+    out[size - 1] = '\0';
+}
+
 /* 功能: 查看租客自己的预约记录；输入: tenantId；输出: 无 */
 static void view_my_appointments(int tenantId) {
     ViewingNode *v;
@@ -752,6 +832,7 @@ static void view_my_appointments(int tenantId) {
     ui_section("我的预约记录");
     for (v = g_db.viewings; v; v = v->next) {
         HouseNode *h;
+        char feedbackShow[MAX_BIG_STR];
         int matchStatus;
         if (v->data.tenantId != tenantId) continue;
         matchStatus = (filter == 0) ||
@@ -761,6 +842,7 @@ static void view_my_appointments(int tenantId) {
         if (!matchStatus) continue;
 
         h = find_house(v->data.houseId);
+        build_agent_feedback_for_tenant(&v->data, feedbackShow, sizeof(feedbackShow));
          printf("预约ID:%d 时间:%s 状态:%s 合同:%s\n",
              v->data.id,
              v->data.datetime,
@@ -771,7 +853,7 @@ static void view_my_appointments(int tenantId) {
         } else {
             printf("  房源ID:%d(详情已删除/不存在)\n", v->data.houseId);
         }
-        printf("  中介ID:%d | 中介回复:%s\n", v->data.agentId, v->data.agentFeedback);
+        printf("  中介ID:%d | 中介反馈:%s\n", v->data.agentId, feedbackShow);
         cnt++;
     }
     if (!cnt) printf("暂无符合条件的预约记录。\n");
@@ -1238,6 +1320,8 @@ static void print_house_detailed(const House *h) {
 
 /* 功能: 打印看房详情卡片；输入: Viewing；输出: 无 */
 static void print_viewing_detailed(const Viewing *v) {
+    char feedbackShow[MAX_BIG_STR];
+    build_agent_feedback_for_tenant(v, feedbackShow, sizeof(feedbackShow));
     printf("┌───────────────────────────────────┐\n");
     printf("│ 看房ID:%d | 时间:%s\n", v->id, v->datetime);
     printf("├───────────────────────────────────┤\n");
@@ -1245,7 +1329,7 @@ static void print_viewing_detailed(const Viewing *v) {
     printf("│ 时长:%d分钟 | 状态:%s\n", v->durationMinutes, viewing_state_text(v->status));
     printf("│ 合同状态:%s\n", viewing_contract_state_text(v->contractStatus));
     if (v->tenantFeedback[0]) printf("│ 租客反馈: %s\n", v->tenantFeedback);
-    if (v->agentFeedback[0]) printf("│ 中介反馈: %s\n", v->agentFeedback);
+    if (feedbackShow[0]) printf("│ 中介反馈: %s\n", feedbackShow);
     printf("└───────────────────────────────────┘\n\n");
 }
 
@@ -2745,24 +2829,39 @@ static void add_rental_for_agent(int agentId) {
 static void assign_viewings_admin(void) {
     ViewingNode *v;
     int found = 0;
+    int changed = 0;
+    if (!reload_database_for_sync()) return;
     for (v = g_db.viewings; v; v = v->next) {
+        int selectable[256];
+        int n;
         int aid;
         if (v->data.agentId != 0) continue;
         found = 1;
         print_viewing_detailed(&v->data);
-        aid = input_int("分配中介ID(0跳过): ", 0, 4999);
-        if (aid == 0) continue;
-        if (!find_agent(aid)) {
-            printf("中介不存在，跳过该条。\n");
+        n = collect_available_responsible_agents_for_slot(
+            v->data.houseId,
+            v->data.datetime,
+            v->data.durationMinutes,
+            v->data.id,
+            selectable,
+            256
+        );
+        if (n <= 0) {
+            printf("当前时段无可分配中介（需负责该房源且时间可用），已跳过。\n");
             continue;
         }
-        if (viewing_conflict(v->data.datetime, v->data.durationMinutes, v->data.houseId, aid, v->data.id)) {
-            printf("分配冲突，跳过该条。\n");
+        display_agents_for_selection(selectable, n);
+        aid = input_int("分配中介ID(0跳过): ", 0, 4999);
+        if (aid == 0) continue;
+        if (!id_in_list(selectable, n, aid)) {
+            printf("该中介不在可选列表中，跳过该条。\n");
             continue;
         }
         v->data.agentId = aid;
+        changed = 1;
         printf("分配成功。\n");
     }
+    if (changed) autosave_default();
     if (!found) printf("暂无待分配看房记录。\n");
 }
 
@@ -2837,7 +2936,7 @@ static void process_pending_viewings_for_agent(int agentId) {
             v->data.status = VIEWING_CONFIRMED;
             format_viewing_feedback(v->data.agentFeedback, sizeof(v->data.agentFeedback), "同意", now, note);
             autosave_default();
-            printf("已同意预约。\n");
+            printf("已同意预约，反馈已保存: %s\n", v->data.agentFeedback);
         } else if (op == 2) {
             char reason[MAX_BIG_STR];
             char now[20];
@@ -2846,7 +2945,7 @@ static void process_pending_viewings_for_agent(int agentId) {
             v->data.status = VIEWING_CANCELLED;
             format_viewing_feedback(v->data.agentFeedback, sizeof(v->data.agentFeedback), "拒绝", now, reason);
             autosave_default();
-            printf("已拒绝预约。\n");
+            printf("已拒绝预约，反馈已保存: %s\n", v->data.agentFeedback);
         }
     }
 }
@@ -3468,16 +3567,16 @@ static void update_viewing_for_tenant(int tenantId) {
 
     if (input_yes_no("修改时长?")) dur = input_int("时长(分钟): ", 10, 600);
     if (input_yes_no("修改中介?")) {
-        int related[256];
+        int responsible[256];
         int n;
         aid = input_int("中介ID(0表示待分配): ", 0, 4999);
         if (aid != 0 && !find_agent(aid)) {
             printf("中介不存在。\n");
             return;
         }
-        n = collect_related_agents_for_house(v->data.houseId, related, 256);
-        if (aid != 0 && n > 0 && !contains_agent_id(related, n, aid)) {
-            printf("该中介不在此房源的对应中介列表中。\n");
+        n = collect_responsible_agents_for_house(v->data.houseId, responsible, 256);
+        if (aid != 0 && !id_in_list(responsible, n, aid)) {
+            printf("该中介不负责此房源，不能选择。\n");
             return;
         }
     }
