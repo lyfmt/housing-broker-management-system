@@ -113,6 +113,9 @@ static void format_viewing_feedback(char *out, size_t size, const char *action, 
 static void secure_zero(void *ptr, size_t len);
 static void fill_end_date_by_term(const char *startDate, int leaseTerm, char endDate[11]);
 static int count_pending_contract_for_triplet(int houseId, int tenantId, int agentId);
+static void add_rental_for_agent_with_viewing(int agentId, int presetViewingId);
+static void agent_contract_workbench_menu(int agentId);
+static int tenant_has_completed_viewing_without_contract(int tenantId);
 
 /*
  * 功能: 32 位无符号整数循环右移
@@ -1182,6 +1185,17 @@ static int generate_next_viewing_id(void) {
     return maxId + 1;
 }
 
+/* 功能: 生成下一个合同ID(租约ID)；输入: 无；输出: 新ID */
+static int generate_next_rental_id(void) {
+    int maxId = 0;
+    RentalNode *r;
+    for (r = g_db.rentals; r; r = r->next) {
+        if (r->data.id > maxId) maxId = r->data.id;
+    }
+    if (maxId < 4000) return 4001;
+    return maxId + 1;
+}
+
 /* 功能: 租客端房源状态文案映射；输入: 房源；输出: 状态中文文本 */
 static const char *tenant_house_state_text(const House *h) {
     if (!h) return "未知";
@@ -1515,7 +1529,11 @@ static void view_my_appointments(int tenantId) {
         if (!matchStatus) continue;
 
         h = find_house(v->data.houseId);
-        printf("预约ID:%d 时间:%s 状态:%s\n", v->data.id, v->data.datetime, viewing_state_text(v->data.status));
+         printf("预约ID:%d 时间:%s 状态:%s 合同:%s\n",
+             v->data.id,
+             v->data.datetime,
+             viewing_state_text(v->data.status),
+             viewing_contract_state_text(v->data.contractStatus));
         if (h) {
             printf("  房源:%s | 户型:%s | 价格:%.2f\n", h->data.community, h->data.houseType, h->data.price);
         } else {
@@ -2235,6 +2253,60 @@ static void seed_demo_data(void) {
         password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
         append_agent(&a);
     }
+    if (!find_agent(1005)) {
+        a.id = 1005;
+        strcpy(a.name, "马超");
+        strcpy(a.gender, "男");
+        strcpy(a.phone, "13700000005");
+        strcpy(a.idCard, "210106198901016257");
+        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
+        append_agent(&a);
+    }
+    if (!find_agent(1006)) {
+        a.id = 1006;
+        strcpy(a.name, "司马诸葛");
+        strcpy(a.gender, "男");
+        strcpy(a.phone, "13700000006");
+        strcpy(a.idCard, "210107199002146611");
+        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
+        append_agent(&a);
+    }
+    if (!find_agent(1007)) {
+        a.id = 1007;
+        strcpy(a.name, "诸葛青");
+        strcpy(a.gender, "男");
+        strcpy(a.phone, "13700000007");
+        strcpy(a.idCard, "210108199310213634");
+        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
+        append_agent(&a);
+    }
+    if (!find_agent(1008)) {
+        a.id = 1008;
+        strcpy(a.name, "马岚");
+        strcpy(a.gender, "女");
+        strcpy(a.phone, "13700000008");
+        strcpy(a.idCard, "210109199504287146");
+        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
+        append_agent(&a);
+    }
+    if (!find_agent(1009)) {
+        a.id = 1009;
+        strcpy(a.name, "司马云");
+        strcpy(a.gender, "女");
+        strcpy(a.phone, "13700000009");
+        strcpy(a.idCard, "210110199612036083");
+        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
+        append_agent(&a);
+    }
+    if (!find_agent(1010)) {
+        a.id = 1010;
+        strcpy(a.name, "赵云飞");
+        strcpy(a.gender, "男");
+        strcpy(a.phone, "13700000010");
+        strcpy(a.idCard, "210111198711058575");
+        password_store(a.password, sizeof(a.password), DEFAULT_AGENT_PASSWORD);
+        append_agent(&a);
+    }
 
     if (!find_tenant(5001)) {
         t.id = 5001;
@@ -2261,6 +2333,69 @@ static void seed_demo_data(void) {
         strcpy(t.phone, "13911114444");
         strcpy(t.idCard, "21010419990316842X");
         password_store(t.password, sizeof(t.password), "tenant03");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5004)) {
+        t.id = 5004;
+        strcpy(t.name, "马超");
+        strcpy(t.gender, "男");
+        strcpy(t.phone, "13911115555");
+        strcpy(t.idCard, "210105199404179531");
+        password_store(t.password, sizeof(t.password), "tenant04");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5005)) {
+        t.id = 5005;
+        strcpy(t.name, "司马诸葛");
+        strcpy(t.gender, "男");
+        strcpy(t.phone, "13911116666");
+        strcpy(t.idCard, "210106199601225237");
+        password_store(t.password, sizeof(t.password), "tenant05");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5006)) {
+        t.id = 5006;
+        strcpy(t.name, "马小雨");
+        strcpy(t.gender, "女");
+        strcpy(t.phone, "13911117777");
+        strcpy(t.idCard, "210107199710116428");
+        password_store(t.password, sizeof(t.password), "tenant06");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5007)) {
+        t.id = 5007;
+        strcpy(t.name, "诸葛亮亮");
+        strcpy(t.gender, "男");
+        strcpy(t.phone, "13911118888");
+        strcpy(t.idCard, "210108199811092736");
+        password_store(t.password, sizeof(t.password), "tenant07");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5008)) {
+        t.id = 5008;
+        strcpy(t.name, "司马昭");
+        strcpy(t.gender, "男");
+        strcpy(t.phone, "13911119999");
+        strcpy(t.idCard, "210109199912257214");
+        password_store(t.password, sizeof(t.password), "tenant08");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5009)) {
+        t.id = 5009;
+        strcpy(t.name, "黄月英");
+        strcpy(t.gender, "女");
+        strcpy(t.phone, "13911110001");
+        strcpy(t.idCard, "210110199211306122");
+        password_store(t.password, sizeof(t.password), "tenant09");
+        append_tenant(&t);
+    }
+    if (!find_tenant(5010)) {
+        t.id = 5010;
+        strcpy(t.name, "马腾");
+        strcpy(t.gender, "男");
+        strcpy(t.phone, "13911110002");
+        strcpy(t.idCard, "210111198812018451");
+        password_store(t.password, sizeof(t.password), "tenant10");
         append_tenant(&t);
     }
 
@@ -2327,6 +2462,138 @@ static void seed_demo_data(void) {
         strcpy(h.ownerPhone, "13566667777");
         h.createdByAgentId = 1003;
         h.status = HOUSE_RENTED;
+        h.rejectReason[0] = '\0';
+        append_house(&h);
+    }
+    if (!find_house(2004)) {
+        h.id = 2004;
+        strcpy(h.city, "沈阳");
+        strcpy(h.region, "和平区");
+        strcpy(h.community, "幸福小区");
+        strcpy(h.address, "中华路128号");
+        strcpy(h.building, "3栋");
+        h.floor = 10;
+        strcpy(h.unitNo, "1002室");
+        strcpy(h.floorNote, "中层");
+        strcpy(h.orientation, "南北");
+        strcpy(h.houseType, "二室一厅一卫");
+        h.area = 92.0;
+        strcpy(h.decoration, "精装");
+        h.price = 4100;
+        strcpy(h.ownerName, "陈先生");
+        strcpy(h.ownerPhone, "13612345671");
+        h.createdByAgentId = 1005;
+        h.status = HOUSE_VACANT;
+        h.rejectReason[0] = '\0';
+        append_house(&h);
+    }
+    if (!find_house(2005)) {
+        h.id = 2005;
+        strcpy(h.city, "沈阳");
+        strcpy(h.region, "浑南区");
+        strcpy(h.community, "幸福家园");
+        strcpy(h.address, "浑南东路56号");
+        strcpy(h.building, "5栋");
+        h.floor = 14;
+        strcpy(h.unitNo, "1401室");
+        strcpy(h.floorNote, "高层");
+        strcpy(h.orientation, "南");
+        strcpy(h.houseType, "二室一厅一卫");
+        h.area = 88.0;
+        strcpy(h.decoration, "精装");
+        h.price = 3950;
+        strcpy(h.ownerName, "杨女士");
+        strcpy(h.ownerPhone, "13612345672");
+        h.createdByAgentId = 1006;
+        h.status = HOUSE_VACANT;
+        h.rejectReason[0] = '\0';
+        append_house(&h);
+    }
+    if (!find_house(2006)) {
+        h.id = 2006;
+        strcpy(h.city, "沈阳");
+        strcpy(h.region, "皇姑区");
+        strcpy(h.community, "幸福里");
+        strcpy(h.address, "崇山中路30号");
+        strcpy(h.building, "2栋");
+        h.floor = 9;
+        strcpy(h.unitNo, "902室");
+        strcpy(h.floorNote, "中层");
+        strcpy(h.orientation, "南北");
+        strcpy(h.houseType, "二室一厅一卫");
+        h.area = 95.0;
+        strcpy(h.decoration, "简装");
+        h.price = 4050;
+        strcpy(h.ownerName, "刘女士");
+        strcpy(h.ownerPhone, "13612345673");
+        h.createdByAgentId = 1007;
+        h.status = HOUSE_VACANT;
+        h.rejectReason[0] = '\0';
+        append_house(&h);
+    }
+    if (!find_house(2007)) {
+        h.id = 2007;
+        strcpy(h.city, "沈阳");
+        strcpy(h.region, "和平区");
+        strcpy(h.community, "幸福雅苑");
+        strcpy(h.address, "太原街88号");
+        strcpy(h.building, "1栋");
+        h.floor = 11;
+        strcpy(h.unitNo, "1103室");
+        strcpy(h.floorNote, "中层");
+        strcpy(h.orientation, "南");
+        strcpy(h.houseType, "二室一厅一卫");
+        h.area = 86.5;
+        strcpy(h.decoration, "精装");
+        h.price = 4000;
+        strcpy(h.ownerName, "宋先生");
+        strcpy(h.ownerPhone, "13612345674");
+        h.createdByAgentId = 1008;
+        h.status = HOUSE_VACANT;
+        h.rejectReason[0] = '\0';
+        append_house(&h);
+    }
+    if (!find_house(2008)) {
+        h.id = 2008;
+        strcpy(h.city, "沈阳");
+        strcpy(h.region, "浑南区");
+        strcpy(h.community, "幸福新城");
+        strcpy(h.address, "创新路66号");
+        strcpy(h.building, "8栋");
+        h.floor = 16;
+        strcpy(h.unitNo, "1602室");
+        strcpy(h.floorNote, "高层");
+        strcpy(h.orientation, "南北");
+        strcpy(h.houseType, "三室一厅两卫");
+        h.area = 102.0;
+        strcpy(h.decoration, "精装");
+        h.price = 4300;
+        strcpy(h.ownerName, "周先生");
+        strcpy(h.ownerPhone, "13612345675");
+        h.createdByAgentId = 1009;
+        h.status = HOUSE_VACANT;
+        h.rejectReason[0] = '\0';
+        append_house(&h);
+    }
+    if (!find_house(2009)) {
+        h.id = 2009;
+        strcpy(h.city, "沈阳");
+        strcpy(h.region, "皇姑区");
+        strcpy(h.community, "幸福花园");
+        strcpy(h.address, "黄河南大街99号");
+        strcpy(h.building, "4栋");
+        h.floor = 7;
+        strcpy(h.unitNo, "702室");
+        strcpy(h.floorNote, "中层");
+        strcpy(h.orientation, "南");
+        strcpy(h.houseType, "二室一厅一卫");
+        h.area = 90.0;
+        strcpy(h.decoration, "简装");
+        h.price = 3900;
+        strcpy(h.ownerName, "吴女士");
+        strcpy(h.ownerPhone, "13612345676");
+        h.createdByAgentId = 1010;
+        h.status = HOUSE_VACANT;
         h.rejectReason[0] = '\0';
         append_house(&h);
     }
@@ -3402,7 +3669,7 @@ static void audit_pending_houses(void) {
 
 /* 功能: 管理员修改租约履约状态；输入: 租约ID与新状态；输出: 无 */
 static void update_rental_status_admin(void) {
-    int id = input_int("租房ID: ", 1, 99999999);
+    int id = input_int("合同ID(租约ID): ", 1, 99999999);
     RentalNode *r = find_rental(id);
     if (!r) {
         printf("记录不存在。\n");
@@ -3562,7 +3829,7 @@ static void add_viewing_for_tenant(int tenantId) {
 }
 
 /* 功能: 中介发起租约（待租客确认）；输入: agentId；输出: 无 */
-static void add_rental_for_agent(int agentId) {
+static void add_rental_for_agent_with_viewing(int agentId, int presetViewingId) {
     Rental r;
     HouseNode *h;
     ViewingNode *linkedViewing = NULL;
@@ -3574,14 +3841,28 @@ static void add_rental_for_agent(int agentId) {
 
     memset(&r, 0, sizeof(r));
 
-    r.id = input_int("租房ID: ", 1, 99999999);
-    if (id_exists_any(r.id)) {
-        printf("ID重复。\n");
-        return;
-    }
+    r.id = generate_next_rental_id();
 
-    if (input_yes_no("是否关联已完成看房记录发起合同?")) {
-        int viewingId = input_int("看房ID: ", 1, 99999999);
+    if (presetViewingId > 0) {
+        linkedViewing = find_viewing(presetViewingId);
+        if (!linkedViewing || linkedViewing->data.agentId != agentId) {
+            printf("看房记录不存在或无权限。\n");
+            return;
+        }
+        if (linkedViewing->data.status != VIEWING_COMPLETED) {
+            printf("仅已完成看房可发起合同。\n");
+            return;
+        }
+        if (linkedViewing->data.contractStatus != VIEWING_CONTRACT_NONE) {
+            printf("该看房记录已关联合同流程。\n");
+            return;
+        }
+        r.appointmentId = linkedViewing->data.id;
+        r.houseId = linkedViewing->data.houseId;
+        r.tenantId = linkedViewing->data.tenantId;
+        printf("已自动填充: 房源ID=%d, 租客ID=%d, 关联看房ID=%d\n", r.houseId, r.tenantId, r.appointmentId);
+    } else if (input_yes_no("是否关联已完成看房预约发起合同?")) {
+        int viewingId = input_int("看房预约ID(不是房源ID): ", 1, 99999999);
         linkedViewing = find_viewing(viewingId);
         if (!linkedViewing || linkedViewing->data.agentId != agentId) {
             printf("看房记录不存在或无权限。\n");
@@ -3663,10 +3944,7 @@ static void add_rental_for_agent(int agentId) {
         printf("数据同步失败，无法确认最新合同状态。\n");
         return;
     }
-    if (id_exists_any(r.id)) {
-        printf("租房ID已被其他会话占用，请重新发起。\n");
-        return;
-    }
+    r.id = generate_next_rental_id();
     h = find_house(r.houseId);
     if (!h) {
         printf("房源已不存在，请刷新后重试。\n");
@@ -3705,7 +3983,13 @@ static void add_rental_for_agent(int agentId) {
         return;
     }
     if (linkedViewing) linkedViewing->data.contractStatus = VIEWING_CONTRACT_PENDING;
-    printf("合同已发起，等待租客确认签订。\n");
+    autosave_default();
+    printf("合同已发起(合同ID:%d)，等待租客确认签订。\n", r.id);
+}
+
+/* 功能: 中介手动发起合同入口；输入: agentId；输出: 无 */
+static void add_rental_for_agent(int agentId) {
+    add_rental_for_agent_with_viewing(agentId, 0);
 }
 
 /* 功能: 管理员分配待分配预约的中介；输入: 无；输出: 无 */
@@ -4545,6 +4829,69 @@ static void process_pending_rentals_for_tenant(int tenantId) {
             refresh_house_status(r->data.houseId);
             autosave_default();
             printf("已拒绝该合同。\n");
+        }
+    }
+}
+
+/* 功能: 判断租客是否存在“已完成但未发起合同”的看房；输入: tenantId；输出: 1有/0无 */
+static int tenant_has_completed_viewing_without_contract(int tenantId) {
+    ViewingNode *v;
+    for (v = g_db.viewings; v; v = v->next) {
+        if (v->data.tenantId != tenantId) continue;
+        if (v->data.status != VIEWING_COMPLETED) continue;
+        if (v->data.contractStatus == VIEWING_CONTRACT_NONE) return 1;
+    }
+    return 0;
+}
+
+/* 功能: 中介合同工作台（完成看房+发起合同）；输入: agentId；输出: 无 */
+static void agent_contract_workbench_menu(int agentId) {
+    int ch;
+    while (1) {
+        printf("\n--- 合同工作台 ---\n");
+        printf("1. 查看可发起合同的已完成看房\n");
+        printf("2. 从已完成看房发起合同(推荐)\n");
+        printf("3. 将已确认看房标记为已完成\n");
+        printf("0. 返回\n");
+        ch = input_int("请选择操作编号: ", 0, 3);
+        if (ch == 0) return;
+        if (ch == 1) {
+            ViewingNode *v;
+            int cnt = 0;
+            ui_section("可发起合同的看房记录");
+            for (v = g_db.viewings; v; v = v->next) {
+                if (v->data.agentId != agentId) continue;
+                if (v->data.status != VIEWING_COMPLETED) continue;
+                if (v->data.contractStatus != VIEWING_CONTRACT_NONE) continue;
+                print_viewing_detailed(&v->data);
+                cnt++;
+            }
+            if (!cnt) printf("暂无可发起合同的已完成看房。\n");
+        } else if (ch == 2) {
+            int viewingId = input_int("输入已完成看房预约ID(不是房源ID): ", 1, 99999999);
+            add_rental_for_agent_with_viewing(agentId, viewingId);
+        } else {
+            int viewingId = input_int("输入要标记完成的看房预约ID(不是房源ID): ", 1, 99999999);
+            ViewingNode *v = find_viewing(viewingId);
+            if (!v || v->data.agentId != agentId) {
+                if (find_house(viewingId)) {
+                    printf("你输入的是房源ID，请输入看房预约ID。\n");
+                } else {
+                    printf("记录不存在或无权限。\n");
+                }
+                continue;
+            }
+            if (v->data.status != VIEWING_CONFIRMED) {
+                if (v->data.status == VIEWING_COMPLETED) {
+                    printf("该看房预约已经是“已完成”状态。\n");
+                } else {
+                    printf("仅“已确认”看房可标记为已完成。\n");
+                }
+                continue;
+            }
+            v->data.status = VIEWING_COMPLETED;
+            autosave_default();
+            printf("已标记看房完成。\n");
         }
     }
 }
@@ -5732,8 +6079,9 @@ static void agent_menu(AgentNode *a) {
         printf("13. 新增房源(提交待审核)\n");
         printf("14. 处理待处理预约(同意/拒绝)\n");
         printf("15. 我的提交房源(状态/重提)\n");
+        printf("16. 合同工作台(看房完成/发起合同)\n");
         printf("0. 退出登录\n");
-        ch = input_int("请选择菜单编号: ", 0, 15);
+        ch = input_int("请选择菜单编号: ", 0, 16);
         if (ch == 0) {
             g_back_ctx = prev;
             return;
@@ -5747,7 +6095,7 @@ static void agent_menu(AgentNode *a) {
             needSave = 1;
         }
         else if (ch == 2) {
-            int id = input_int("租房ID: ", 1, 99999999);
+            int id = input_int("合同ID(租约ID): ", 1, 99999999);
             RentalNode *r = find_rental(id);
             if (!r || r->data.agentId != agentId) {
                 printf("记录不存在或无权限。\n");
@@ -5760,7 +6108,7 @@ static void agent_menu(AgentNode *a) {
                 needSave = 1;
             }
         } else if (ch == 3) {
-            int id = input_int("租房ID: ", 1, 99999999);
+            int id = input_int("合同ID(租约ID): ", 1, 99999999);
             RentalNode *r = find_rental(id);
             int houseId;
             if (!r || r->data.agentId != agentId) {
@@ -5806,8 +6154,11 @@ static void agent_menu(AgentNode *a) {
             add_house_item_for_agent(agentId);
         } else if (ch == 14) {
             process_pending_viewings_for_agent(agentId);
-        } else {
+        } else if (ch == 15) {
             agent_submitted_houses_menu(agentId);
+        } else {
+            agent_contract_workbench_menu(agentId);
+            needSave = 1;
         }
         if (needSave) autosave_default();
     }
@@ -5990,7 +6341,11 @@ static void tenant_menu(TenantNode *t) {
             if (profileUpdated) needSave = 1;
         } else {
             if (!tenant_has_pending_rental(tenantId)) {
-                printf("暂无待签合同。\n");
+                if (tenant_has_completed_viewing_without_contract(tenantId)) {
+                    printf("暂无待签合同。你已有“已完成看房”，请等待中介在“合同工作台”发起合同。\n");
+                } else {
+                    printf("暂无待签合同。请先完成看房流程（中介同意后完成看房并发起合同）。\n");
+                }
                 continue;
             }
             process_pending_rentals_for_tenant(tenantId);
