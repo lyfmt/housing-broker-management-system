@@ -26,6 +26,11 @@
 #define VIEWING_CANCELLED   3  /* 已取消 */
 #define VIEWING_MISSED      4  /* 未赴约 */
 
+/* ==================== 看房-合同关联状态 ==================== */
+#define VIEWING_CONTRACT_NONE     0  /* 未发起合同 */
+#define VIEWING_CONTRACT_PENDING  1  /* 已发起合同待确认 */
+#define VIEWING_CONTRACT_DONE     2  /* 合同已完成 */
+
 /* ==================== 租约状态 ==================== */
 #define RENTAL_ACTIVE   0   /* 有效 */
 #define RENTAL_EXPIRED  1   /* 已到期 */
@@ -118,6 +123,7 @@ typedef struct {
     int agentId;          /* 0 表示待分配 */
     int durationMinutes;
     int status;           /* VIEWING_xxx */
+    int contractStatus;   /* VIEWING_CONTRACT_xxx */
     char tenantFeedback[MAX_BIG_STR];
     char agentFeedback[MAX_BIG_STR];
 } Viewing;
@@ -135,10 +141,15 @@ typedef struct {
     int houseId;
     int tenantId;
     int agentId;
+    int appointmentId;      /* 关联看房ID，0 表示无关联 */
     char contractDate[11]; /* YYYY-MM-DD */
     char startDate[11];    /* YYYY-MM-DD */
     char endDate[11];      /* YYYY-MM-DD */
+    int leaseTerm;         /* 租期（月） */
     double monthlyRent;
+    double deposit;        /* 押金 */
+    char otherTerms[500];  /* 其他条款 */
+    char rejectReason[MAX_BIG_STR]; /* 拒签原因 */
     int status;            /* RENTAL_xxx */
     int signStatus;        /* RENTAL_SIGN_xxx */
 } Rental;

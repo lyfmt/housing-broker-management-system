@@ -103,6 +103,7 @@ static int append_viewing(const Viewing *v);
 static void autosave_default(void);
 static int contains_case_insensitive(const char *s, const char *sub);
 static const char *viewing_state_text(int s);
+static const char *viewing_contract_state_text(int s);
 static const char *rental_sign_state_text(int s);
 static int collect_related_agents_for_house(int houseId, int *ids, int maxN);
 static int has_open_contract_for_house(int houseId, int ignoreId);
@@ -110,6 +111,8 @@ static int house_is_open_for_viewing(const House *h);
 static int appointment_time_is_in_future(const char *dt);
 static void format_viewing_feedback(char *out, size_t size, const char *action, const char *now, const char *detail);
 static void secure_zero(void *ptr, size_t len);
+static void fill_end_date_by_term(const char *startDate, int leaseTerm, char endDate[11]);
+static int count_pending_contract_for_triplet(int houseId, int tenantId, int agentId);
 
 /*
  * 功能: 32 位无符号整数循环右移
@@ -915,6 +918,17 @@ static void get_current_datetime(char *buffer, int size) {
              pt->tm_year + 1900, pt->tm_mon + 1, pt->tm_mday, pt->tm_hour, pt->tm_min);
 }
 
+/* 功能: 追加合同操作日志；输入: action/detail；输出: 无 */
+static void log_contract_action(const char *action, const char *detail) {
+    FILE *fp;
+    char now[20];
+    get_current_datetime(now, sizeof(now));
+    fp = fopen("contract_ops.log", "a");
+    if (!fp) return;
+    fprintf(fp, "[%s] %s | %s\n", now, action ? action : "-", detail ? detail : "-");
+    fclose(fp);
+}
+
 /* 功能: 日期字符串转 time_t；输入: YYYY-MM-DD；输出: 时间戳，失败返回 -1 */
 static time_t date_to_time(const char *s) {
     struct tm t;
@@ -949,6 +963,43 @@ static int compare_date_str(const char *a, const char *b) {
     if (ta < tb) return -1;
     if (ta > tb) return 1;
     return 0;
+}
+
+/* 功能: 计算两个时间区间重叠天数；输入: 区间起止时间；输出: 重叠天数 */
+static double overlap_days(time_t s1, time_t e1, time_t s2, time_t e2) {
+    time_t s = (s1 > s2) ? s1 : s2;
+    time_t e = (e1 < e2) ? e1 : e2;
+    if (e <= s) return 0.0;
+    return difftime(e, s) / 86400.0;
+}
+
+/* 功能: 计算单份租约时长（天）；输入: 租约；输出: 天数 */
+static double rental_duration_days(const Rental *r) {
+    time_t s, e;
+    if (!r) return 0.0;
+    s = date_to_time(r->startDate);
+    e = date_to_time(r->endDate);
+    if (s == (time_t)-1 || e == (time_t)-1 || e <= s) return 0.0;
+    return difftime(e, s) / 86400.0;
+}
+
+/* 功能: 读取统计日期区间；输入: start/end；输出: 1成功/0失败 */
+static int input_date_range(char start[11], char end[11]) {
+    while (1) {
+        input_non_empty("开始日期(YYYY-MM-DD): ", start, 11);
+        if (validate_date(start)) break;
+        printf("日期格式错误。\n");
+    }
+    while (1) {
+        input_non_empty("结束日期(YYYY-MM-DD): ", end, 11);
+        if (validate_date(end)) break;
+        printf("日期格式错误。\n");
+    }
+    if (compare_date_str(end, start) < 0) {
+        printf("结束日期不能早于开始日期。\n");
+        return 0;
+    }
+    return 1;
 }
 
 /*
@@ -1338,6 +1389,7 @@ static void make_appointment_for_tenant(int tenantId, int houseId) {
     }
 
     v.status = VIEWING_UNCONFIRMED;
+    v.contractStatus = VIEWING_CONTRACT_NONE;
     strcpy(v.tenantFeedback, "-");
     strcpy(v.agentFeedback, "-");
     if (!append_viewing(&v)) {
@@ -1651,6 +1703,12 @@ static int remove_rental(int id) {
     RentalNode *pre = NULL;
     while (cur) {
         if (cur->data.id == id) {
+            if (cur->data.appointmentId > 0) {
+                ViewingNode *v = find_viewing(cur->data.appointmentId);
+                if (v && v->data.contractStatus != VIEWING_CONTRACT_DONE) {
+                    v->data.contractStatus = VIEWING_CONTRACT_NONE;
+                }
+            }
             if (pre) pre->next = cur->next;
             else g_db.rentals = cur->next;
             secure_zero(cur, sizeof(*cur));
@@ -1830,6 +1888,14 @@ static const char *viewing_state_text(int s) {
     return "未知";
 }
 
+/* 功能: 看房合同关联状态码转中文文本；输入: 状态码；输出: 文本 */
+static const char *viewing_contract_state_text(int s) {
+    if (s == VIEWING_CONTRACT_NONE) return "未发起合同";
+    if (s == VIEWING_CONTRACT_PENDING) return "合同待确认";
+    if (s == VIEWING_CONTRACT_DONE) return "合同已完成";
+    return "未知";
+}
+
 /* 功能: 履约状态码转中文文本；输入: 状态码；输出: 文本 */
 static const char *rental_state_text(int s) {
     if (s == RENTAL_ACTIVE) return "有效";
@@ -1927,6 +1993,7 @@ static void print_viewing_detailed(const Viewing *v) {
     printf("├───────────────────────────────────┤\n");
     printf("│ 房源ID:%d | 租客ID:%d | 中介ID:%d\n", v->houseId, v->tenantId, v->agentId);
     printf("│ 时长:%d分钟 | 状态:%s\n", v->durationMinutes, viewing_state_text(v->status));
+    printf("│ 合同状态:%s\n", viewing_contract_state_text(v->contractStatus));
     if (v->tenantFeedback[0]) printf("│ 租客反馈: %s\n", v->tenantFeedback);
     if (v->agentFeedback[0]) printf("│ 中介反馈: %s\n", v->agentFeedback);
     printf("└───────────────────────────────────┘\n\n");
@@ -1938,9 +2005,14 @@ static void print_rental_detailed(const Rental *r) {
     printf("│ 租约ID:%d | 合同日期:%s\n", r->id, r->contractDate);
     printf("├─────────────────────────────────────┤\n");
     printf("│ 房源ID:%d | 租客ID:%d | 中介ID:%d\n", r->houseId, r->tenantId, r->agentId);
+    if (r->appointmentId > 0) printf("│ 关联看房ID:%d\n", r->appointmentId);
     printf("│ 起租:%s - 到期:%s\n", r->startDate, r->endDate);
+    if (r->leaseTerm > 0) printf("│ 租期:%d个月\n", r->leaseTerm);
     printf("│ 月租:¥%.2f | 合同:%s | 履约:%s\n",
            r->monthlyRent, rental_sign_state_text(r->signStatus), rental_state_text(r->status));
+    if (r->deposit > 0.0) printf("│ 押金:¥%.2f\n", r->deposit);
+    if (r->otherTerms[0]) printf("│ 其他条款: %s\n", r->otherTerms);
+    if (r->rejectReason[0]) printf("│ 拒签原因: %s\n", r->rejectReason);
     printf("└─────────────────────────────────────┘\n\n");
 }
 
@@ -1955,6 +2027,41 @@ static int contains_case_insensitive(const char *s, const char *sub) {
         if (!sub[j]) return 1;
     }
     return 0;
+}
+
+/* 功能: 依据起租日期和租期(月)回填到期日期；输入: startDate/leaseTerm；输出: endDate */
+static void fill_end_date_by_term(const char *startDate, int leaseTerm, char endDate[11]) {
+    struct tm tmStart;
+    if (!parse_date(startDate, &tmStart) || leaseTerm <= 0) {
+        if (endDate) {
+            strncpy(endDate, startDate, 10);
+            endDate[10] = '\0';
+        }
+        return;
+    }
+    tmStart.tm_mon += leaseTerm;
+    tmStart.tm_mday -= 1;
+    {
+        time_t t = mktime(&tmStart);
+        struct tm *pt = localtime(&t);
+        if (!pt || strftime(endDate, 11, "%Y-%m-%d", pt) == 0) {
+            strncpy(endDate, startDate, 10);
+            endDate[10] = '\0';
+        }
+    }
+}
+
+/* 功能: 统计同房源-租客-中介组合的待签合同数；输入: houseId/tenantId/agentId；输出: 数量 */
+static int count_pending_contract_for_triplet(int houseId, int tenantId, int agentId) {
+    int cnt = 0;
+    RentalNode *r;
+    for (r = g_db.rentals; r; r = r->next) {
+        if (r->data.houseId != houseId) continue;
+        if (r->data.tenantId != tenantId) continue;
+        if (r->data.agentId != agentId) continue;
+        if (r->data.signStatus == RENTAL_SIGN_PENDING) cnt++;
+    }
+    return cnt;
 }
 
 /*
@@ -2225,6 +2332,7 @@ static void seed_demo_data(void) {
     }
 
     if (!find_viewing(3001)) {
+        memset(&v, 0, sizeof(v));
         v.id = 3001;
         strcpy(v.datetime, "2026-03-20 14:30");
         v.houseId = 2001;
@@ -2232,11 +2340,13 @@ static void seed_demo_data(void) {
         v.agentId = 1002;
         v.durationMinutes = 45;
         v.status = VIEWING_CONFIRMED;
+        v.contractStatus = VIEWING_CONTRACT_NONE;
         strcpy(v.tenantFeedback, "-");
         strcpy(v.agentFeedback, "已电话确认");
         append_viewing(&v);
     }
     if (!find_viewing(3002)) {
+        memset(&v, 0, sizeof(v));
         v.id = 3002;
         strcpy(v.datetime, "2026-03-22 10:00");
         v.houseId = 2002;
@@ -2244,20 +2354,27 @@ static void seed_demo_data(void) {
         v.agentId = 0;
         v.durationMinutes = 30;
         v.status = VIEWING_UNCONFIRMED;
+        v.contractStatus = VIEWING_CONTRACT_NONE;
         strcpy(v.tenantFeedback, "-");
         strcpy(v.agentFeedback, "-");
         append_viewing(&v);
     }
 
     if (!find_rental(4001)) {
+        memset(&r, 0, sizeof(r));
         r.id = 4001;
         r.houseId = 2003;
         r.tenantId = 5003;
         r.agentId = 1001;
+        r.appointmentId = 0;
         strcpy(r.contractDate, "2026-02-15");
         strcpy(r.startDate, "2026-03-01");
         strcpy(r.endDate, "2027-02-28");
+        r.leaseTerm = 12;
         r.monthlyRent = 4300;
+        r.deposit = 8600;
+        r.otherTerms[0] = '\0';
+        r.rejectReason[0] = '\0';
         r.status = RENTAL_ACTIVE;
         r.signStatus = RENTAL_SIGN_CONFIRMED;
         append_rental(&r);
@@ -2726,6 +2843,7 @@ static void delete_agent_item(void) {
     ViewingNode *v;
     RentalNode *r;
     int linked = 0;
+    int hasOpenContract = 0;
     int srcId;
     if (!a) return;
         printf("目标中介: ID:%d 姓名:%s 性别:%s 电话:%s\n",
@@ -2735,7 +2853,18 @@ static void delete_agent_item(void) {
             a->data.phone);
     srcId = a->data.id;
     for (v = g_db.viewings; v; v = v->next) if (v->data.agentId == srcId) linked = 1;
-    for (r = g_db.rentals; r; r = r->next) if (r->data.agentId == srcId) linked = 1;
+    for (r = g_db.rentals; r; r = r->next) {
+        if (r->data.agentId != srcId) continue;
+        linked = 1;
+        if (r->data.signStatus == RENTAL_SIGN_PENDING ||
+            (r->data.signStatus == RENTAL_SIGN_CONFIRMED && r->data.status == RENTAL_ACTIVE)) {
+            hasOpenContract = 1;
+        }
+    }
+    if (hasOpenContract) {
+        printf("该中介存在未终止合同，不允许删除。\n");
+        return;
+    }
     if (linked) {
         if (input_yes_no("存在关联记录，是否转移到其他中介?")) {
             int toId = input_int("目标中介ID: ", 1000, 4999);
@@ -3283,8 +3412,14 @@ static void update_rental_status_admin(void) {
         printf("该合同尚未签订，不能修改履约状态。\n");
         return;
     }
-    printf("履约状态可选: 0.有效  1.已到期  2.提前退租\n");
+    printf("履约状态可选: 0.有效  1.已到期  2.提前退租(可视为强制终止)\n");
     r->data.status = input_int("请选择履约状态编号: ", 0, 2);
+    if (r->data.status == RENTAL_EARLY) {
+        char logLine[256];
+        snprintf(logLine, sizeof(logLine), "管理员强制终止合同 租约ID=%d 房源ID=%d 租客ID=%d 中介ID=%d",
+                 r->data.id, r->data.houseId, r->data.tenantId, r->data.agentId);
+        log_contract_action("FORCE_TERMINATE", logLine);
+    }
     refresh_house_status(r->data.houseId);
     printf("更新成功。\n");
 }
@@ -3430,11 +3565,14 @@ static void add_viewing_for_tenant(int tenantId) {
 static void add_rental_for_agent(int agentId) {
     Rental r;
     HouseNode *h;
+    ViewingNode *linkedViewing = NULL;
 
     if (!reload_database_for_sync()) {
         printf("数据同步失败，无法发起合同。\n");
         return;
     }
+
+    memset(&r, 0, sizeof(r));
 
     r.id = input_int("租房ID: ", 1, 99999999);
     if (id_exists_any(r.id)) {
@@ -3442,7 +3580,28 @@ static void add_rental_for_agent(int agentId) {
         return;
     }
 
-    r.houseId = input_int("房源ID: ", 1, 99999999);
+    if (input_yes_no("是否关联已完成看房记录发起合同?")) {
+        int viewingId = input_int("看房ID: ", 1, 99999999);
+        linkedViewing = find_viewing(viewingId);
+        if (!linkedViewing || linkedViewing->data.agentId != agentId) {
+            printf("看房记录不存在或无权限。\n");
+            return;
+        }
+        if (linkedViewing->data.status != VIEWING_COMPLETED) {
+            printf("仅已完成看房可发起合同。\n");
+            return;
+        }
+        if (linkedViewing->data.contractStatus != VIEWING_CONTRACT_NONE) {
+            printf("该看房记录已关联合同流程。\n");
+            return;
+        }
+        r.appointmentId = linkedViewing->data.id;
+        r.houseId = linkedViewing->data.houseId;
+        r.tenantId = linkedViewing->data.tenantId;
+        printf("已自动填充: 房源ID=%d, 租客ID=%d, 关联看房ID=%d\n", r.houseId, r.tenantId, r.appointmentId);
+    }
+
+    if (r.houseId == 0) r.houseId = input_int("房源ID: ", 1, 99999999);
     h = find_house(r.houseId);
     if (!h) {
         printf("房源不存在。\n");
@@ -3457,12 +3616,17 @@ static void add_rental_for_agent(int agentId) {
         return;
     }
 
-    r.tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+    if (r.tenantId == 0) r.tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
     if (!find_tenant(r.tenantId)) {
         printf("租客不存在。\n");
         return;
     }
     r.agentId = agentId;
+
+    if (count_pending_contract_for_triplet(r.houseId, r.tenantId, r.agentId) > 0) {
+        printf("同一房源-租客-中介已存在待确认合同，不能重复发起。\n");
+        return;
+    }
 
     while (1) {
         input_non_empty("合同日期(YYYY-MM-DD): ", r.contractDate, sizeof(r.contractDate));
@@ -3474,22 +3638,24 @@ static void add_rental_for_agent(int agentId) {
         if (validate_date(r.startDate)) break;
         printf("日期格式错误。\n");
     }
-    while (1) {
-        input_non_empty("到期日期(YYYY-MM-DD): ", r.endDate, sizeof(r.endDate));
-        if (validate_date(r.endDate)) break;
-        printf("日期格式错误。\n");
-    }
+    r.leaseTerm = input_int("租期(月): ", 1, 240);
+    fill_end_date_by_term(r.startDate, r.leaseTerm, r.endDate);
+    printf("按起租+租期自动计算到期日期: %s\n", r.endDate);
 
     if (compare_date_str(r.startDate, r.contractDate) < 0) {
         printf("起租日期不能早于合同日期。\n");
         return;
     }
-    if (compare_date_str(r.endDate, r.startDate) <= 0) {
+    if (compare_date_str(r.endDate, r.startDate) < 0) {
         printf("到期日期必须晚于起租日期。\n");
         return;
     }
 
     r.monthlyRent = input_double("实际月租: ", 0.01, 10000000.0);
+    r.deposit = input_double("押金金额: ", 0.0, 50000000.0);
+    printf("其他条款(可空): ");
+    read_line(r.otherTerms, sizeof(r.otherTerms));
+    r.rejectReason[0] = '\0';
     r.status = RENTAL_ACTIVE;
     r.signStatus = RENTAL_SIGN_PENDING;
 
@@ -3514,15 +3680,31 @@ static void add_rental_for_agent(int agentId) {
         printf("该房源已有待签或生效中的租约，不能重复发起。\n");
         return;
     }
+    if (count_pending_contract_for_triplet(r.houseId, r.tenantId, r.agentId) > 0) {
+        printf("同一房源-租客-中介已存在待确认合同，不能重复发起。\n");
+        return;
+    }
     if (!find_tenant(r.tenantId)) {
         printf("租客已不存在，请刷新后重试。\n");
         return;
+    }
+    if (r.appointmentId > 0) {
+        linkedViewing = find_viewing(r.appointmentId);
+        if (!linkedViewing || linkedViewing->data.agentId != agentId || linkedViewing->data.status != VIEWING_COMPLETED) {
+            printf("关联看房记录已变化，请重新发起。\n");
+            return;
+        }
+        if (linkedViewing->data.contractStatus != VIEWING_CONTRACT_NONE) {
+            printf("关联看房记录已被其他合同占用。\n");
+            return;
+        }
     }
 
     if (!append_rental(&r)) {
         printf("内存不足。\n");
         return;
     }
+    if (linkedViewing) linkedViewing->data.contractStatus = VIEWING_CONTRACT_PENDING;
     printf("合同已发起，等待租客确认签订。\n");
 }
 
@@ -3877,8 +4059,8 @@ static void query_agent_rentals(int agentId) {
 
 /* 功能: 对中介预约进行排序展示；输入: agentId；输出: 无 */
 static void sort_agent_viewings(int agentId) {
-    printf("排序属性: 1.时间  2.时长  3.状态(同状态再按时间)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.时间  2.时长  3.状态(同状态再按时间)  4.多属性(状态->时间->时长)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     Viewing *arr;
     int n = 0;
@@ -3910,9 +4092,14 @@ static void sort_agent_viewings(int agentId) {
             } else if (mode == 2) {
                 swap = (ord == 1) ? (arr[j].durationMinutes > arr[j + 1].durationMinutes)
                                   : (arr[j].durationMinutes < arr[j + 1].durationMinutes);
+            } else if (mode == 3) {
+                int c = arr[j].status - arr[j + 1].status;
+                if (c == 0) c = strcmp(arr[j].datetime, arr[j + 1].datetime);
+                swap = (ord == 1) ? (c > 0) : (c < 0);
             } else {
                 int c = arr[j].status - arr[j + 1].status;
                 if (c == 0) c = strcmp(arr[j].datetime, arr[j + 1].datetime);
+                if (c == 0) c = arr[j].durationMinutes - arr[j + 1].durationMinutes;
                 swap = (ord == 1) ? (c > 0) : (c < 0);
             }
             if (swap) {
@@ -3930,8 +4117,8 @@ static void sort_agent_viewings(int agentId) {
 
 /* 功能: 对中介租约进行排序展示；输入: agentId；输出: 无 */
 static void sort_agent_rentals(int agentId) {
-    printf("排序属性: 1.合同日期  2.月租  3.起租日期(同日起再按月租)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.合同日期  2.月租  3.起租日期(同日起再按月租)  4.多属性(状态->合同日期->月租)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     Rental *arr;
     int n = 0;
@@ -3963,8 +4150,16 @@ static void sort_agent_rentals(int agentId) {
             } else if (mode == 2) {
                 swap = (ord == 1) ? (arr[j].monthlyRent > arr[j + 1].monthlyRent)
                                   : (arr[j].monthlyRent < arr[j + 1].monthlyRent);
-            } else {
+            } else if (mode == 3) {
                 int c = compare_date_str(arr[j].startDate, arr[j + 1].startDate);
+                if (c == 0) {
+                    if (arr[j].monthlyRent < arr[j + 1].monthlyRent) c = -1;
+                    else if (arr[j].monthlyRent > arr[j + 1].monthlyRent) c = 1;
+                }
+                swap = (ord == 1) ? (c > 0) : (c < 0);
+            } else {
+                int c = arr[j].status - arr[j + 1].status;
+                if (c == 0) c = compare_date_str(arr[j].contractDate, arr[j + 1].contractDate);
                 if (c == 0) {
                     if (arr[j].monthlyRent < arr[j + 1].monthlyRent) c = -1;
                     else if (arr[j].monthlyRent > arr[j + 1].monthlyRent) c = 1;
@@ -4005,7 +4200,7 @@ static void agent_sort_menu(int agentId) {
 
 /* 功能: 中介业务统计菜单；输入: agentId；输出: 无 */
 static void agent_statistics_menu(int agentId) {
-    int ch = input_int("1看房统计 2租约统计 3指定租客业务统计 4按签约月份统计: ", 1, 4);
+    int ch = input_int("1看房统计 2租约统计 3指定租客业务统计 4按签约月份统计 5按日期区间统计看房 6按日期区间统计租约: ", 1, 6);
     if (ch == 1) {
         ViewingNode *v;
         int total = 0;
@@ -4064,7 +4259,7 @@ static void agent_statistics_menu(int agentId) {
             }
         }
         printf("租客ID:%d 在该中介名下 看房:%d 租约:%d 累计月租:%.2f\n", tenantId, vcnt, rcnt, rentSum);
-    } else {
+    } else if (ch == 4) {
         char month[8];
         RentalNode *r;
         int cnt = 0;
@@ -4081,6 +4276,61 @@ static void agent_statistics_menu(int agentId) {
             rentSum += r->data.monthlyRent;
         }
         printf("月份:%s 签约数:%d 平均月租:%.2f\n", month, cnt, cnt ? rentSum / cnt : 0.0);
+    } else if (ch == 5) {
+        char startDT[20], endDT[20];
+        ViewingNode *v;
+        int cnt = 0;
+        int durationSum = 0;
+        while (1) {
+            input_non_empty("开始时间(YYYY-MM-DD HH:MM): ", startDT, sizeof(startDT));
+            if (validate_datetime(startDT)) break;
+            printf("时间格式错误。\n");
+        }
+        while (1) {
+            input_non_empty("结束时间(YYYY-MM-DD HH:MM): ", endDT, sizeof(endDT));
+            if (validate_datetime(endDT)) break;
+            printf("时间格式错误。\n");
+        }
+        if (strcmp(endDT, startDT) < 0) {
+            printf("结束时间不能早于开始时间。\n");
+            return;
+        }
+        for (v = g_db.viewings; v; v = v->next) {
+            if (v->data.agentId != agentId) continue;
+            if (strcmp(v->data.datetime, startDT) < 0) continue;
+            if (strcmp(v->data.datetime, endDT) > 0) continue;
+            cnt++;
+            durationSum += v->data.durationMinutes;
+        }
+        printf("区间[%s ~ %s] 看房次数:%d 平均时长:%.2f分钟\n",
+               startDT, endDT, cnt, cnt ? (double)durationSum / cnt : 0.0);
+    } else {
+        char start[11], end[11];
+        time_t winStart, winEnd;
+        RentalNode *r;
+        int cnt = 0;
+        double rentSum = 0.0;
+        double durationSum = 0.0;
+        if (!input_date_range(start, end)) return;
+        winStart = date_to_time(start);
+        winEnd = date_to_time(end);
+        if (winStart == (time_t)-1 || winEnd == (time_t)-1) {
+            printf("日期解析失败。\n");
+            return;
+        }
+        winEnd += 86400;
+        for (r = g_db.rentals; r; r = r->next) {
+            time_t contractTs;
+            if (r->data.agentId != agentId) continue;
+            contractTs = date_to_time(r->data.contractDate);
+            if (contractTs == (time_t)-1) continue;
+            if (contractTs < winStart || contractTs >= winEnd) continue;
+            cnt++;
+            rentSum += r->data.monthlyRent;
+            durationSum += rental_duration_days(&r->data);
+        }
+        printf("区间[%s ~ %s] 签约数:%d 平均月租:%.2f 平均租期:%.2f天\n",
+               start, end, cnt, cnt ? rentSum / cnt : 0.0, cnt ? durationSum / cnt : 0.0);
     }
 }
 
@@ -4259,21 +4509,39 @@ static void process_pending_rentals_for_tenant(int tenantId) {
         op = input_int("1确认签订 2拒绝签订 3取消: ", 1, 3);
         if (op == 1) {
             HouseNode *h;
+            ViewingNode *v = NULL;
             if (has_open_contract_for_house(r->data.houseId, r->data.id)) {
                 printf("房源存在冲突租约，当前合同无法签订，请联系中介。\n");
                 continue;
             }
+            h = find_house(r->data.houseId);
+            if (!h || h->data.status != HOUSE_VACANT) {
+                printf("房源已被租出，请联系中介重新发起。\n");
+                continue;
+            }
             r->data.signStatus = RENTAL_SIGN_CONFIRMED;
             r->data.status = RENTAL_ACTIVE;
-            h = find_house(r->data.houseId);
             if (h && h->data.status != HOUSE_OFFLINE && h->data.status != HOUSE_PENDING) {
                 h->data.status = HOUSE_RENTED;
+            }
+            if (r->data.appointmentId > 0) {
+                v = find_viewing(r->data.appointmentId);
+                if (v) v->data.contractStatus = VIEWING_CONTRACT_DONE;
             }
             autosave_default();
             printf("已确认签订。\n");
         } else if (op == 2) {
+            char reason[MAX_BIG_STR];
+            ViewingNode *v = NULL;
+            input_non_empty("拒绝理由: ", reason, sizeof(reason));
+            strncpy(r->data.rejectReason, reason, sizeof(r->data.rejectReason) - 1);
+            r->data.rejectReason[sizeof(r->data.rejectReason) - 1] = '\0';
             r->data.signStatus = RENTAL_SIGN_REJECTED;
             r->data.status = RENTAL_EARLY;
+            if (r->data.appointmentId > 0) {
+                v = find_viewing(r->data.appointmentId);
+                if (v) v->data.contractStatus = VIEWING_CONTRACT_NONE;
+            }
             refresh_house_status(r->data.houseId);
             autosave_default();
             printf("已拒绝该合同。\n");
@@ -4389,8 +4657,8 @@ static void query_tenant_rentals(int tenantId) {
 
 /* 功能: 租客预约排序展示；输入: tenantId；输出: 无 */
 static void sort_tenant_viewings(int tenantId) {
-    printf("排序属性: 1.时间  2.时长  3.状态(同状态再按时间)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.时间  2.时长  3.状态(同状态再按时间)  4.多属性(状态->时间->时长)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     Viewing *arr;
     int n = 0;
@@ -4422,9 +4690,14 @@ static void sort_tenant_viewings(int tenantId) {
             } else if (mode == 2) {
                 swap = (ord == 1) ? (arr[j].durationMinutes > arr[j + 1].durationMinutes)
                                   : (arr[j].durationMinutes < arr[j + 1].durationMinutes);
+            } else if (mode == 3) {
+                int c = arr[j].status - arr[j + 1].status;
+                if (c == 0) c = strcmp(arr[j].datetime, arr[j + 1].datetime);
+                swap = (ord == 1) ? (c > 0) : (c < 0);
             } else {
                 int c = arr[j].status - arr[j + 1].status;
                 if (c == 0) c = strcmp(arr[j].datetime, arr[j + 1].datetime);
+                if (c == 0) c = arr[j].durationMinutes - arr[j + 1].durationMinutes;
                 swap = (ord == 1) ? (c > 0) : (c < 0);
             }
             if (swap) {
@@ -4442,8 +4715,8 @@ static void sort_tenant_viewings(int tenantId) {
 
 /* 功能: 租客租约排序展示；输入: tenantId；输出: 无 */
 static void sort_tenant_rentals(int tenantId) {
-    printf("排序属性: 1.合同日期  2.月租  3.起租日期(同日起再按月租)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.合同日期  2.月租  3.起租日期(同日起再按月租)  4.多属性(状态->合同日期->月租)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     Rental *arr;
     int n = 0;
@@ -4475,8 +4748,16 @@ static void sort_tenant_rentals(int tenantId) {
             } else if (mode == 2) {
                 swap = (ord == 1) ? (arr[j].monthlyRent > arr[j + 1].monthlyRent)
                                   : (arr[j].monthlyRent < arr[j + 1].monthlyRent);
-            } else {
+            } else if (mode == 3) {
                 int c = compare_date_str(arr[j].startDate, arr[j + 1].startDate);
+                if (c == 0) {
+                    if (arr[j].monthlyRent < arr[j + 1].monthlyRent) c = -1;
+                    else if (arr[j].monthlyRent > arr[j + 1].monthlyRent) c = 1;
+                }
+                swap = (ord == 1) ? (c > 0) : (c < 0);
+            } else {
+                int c = arr[j].status - arr[j + 1].status;
+                if (c == 0) c = compare_date_str(arr[j].contractDate, arr[j + 1].contractDate);
                 if (c == 0) {
                     if (arr[j].monthlyRent < arr[j + 1].monthlyRent) c = -1;
                     else if (arr[j].monthlyRent > arr[j + 1].monthlyRent) c = 1;
@@ -4628,7 +4909,7 @@ static void tenant_sort_menu(int tenantId) {
 
 /* 功能: 租客统计菜单；输入: tenantId；输出: 无 */
 static void tenant_statistics_menu(int tenantId) {
-    int ch = input_int("1看房统计 2租约统计 3按时间范围统计看房 4按月份统计租约: ", 1, 4);
+    int ch = input_int("1看房统计 2租约统计 3按时间范围统计看房 4按月份统计租约 5按日期区间统计租约: ", 1, 5);
     if (ch == 1) {
         ViewingNode *v;
         int total = 0;
@@ -4695,7 +4976,7 @@ static void tenant_statistics_menu(int tenantId) {
             cnt++;
         }
         printf("时间范围内看房次数:%d\n", cnt);
-    } else {
+    } else if (ch == 4) {
         char month[8];
         RentalNode *r;
         int cnt = 0;
@@ -4712,6 +4993,37 @@ static void tenant_statistics_menu(int tenantId) {
             rentSum += r->data.monthlyRent;
         }
         printf("月份:%s 租约数:%d 平均月租:%.2f\n", month, cnt, cnt ? rentSum / cnt : 0.0);
+    } else {
+        char start[11], end[11];
+        time_t winStart, winEnd;
+        RentalNode *r;
+        int cnt = 0;
+        int active = 0;
+        double rentSum = 0.0;
+        double durationSum = 0.0;
+        if (!input_date_range(start, end)) return;
+        winStart = date_to_time(start);
+        winEnd = date_to_time(end);
+        if (winStart == (time_t)-1 || winEnd == (time_t)-1) {
+            printf("日期解析失败。\n");
+            return;
+        }
+        winEnd += 86400;
+        for (r = g_db.rentals; r; r = r->next) {
+            time_t contractTs;
+            if (r->data.tenantId != tenantId) continue;
+            contractTs = date_to_time(r->data.contractDate);
+            if (contractTs == (time_t)-1) continue;
+            if (contractTs < winStart || contractTs >= winEnd) continue;
+            cnt++;
+            if (r->data.status == RENTAL_ACTIVE) active++;
+            rentSum += r->data.monthlyRent;
+            durationSum += rental_duration_days(&r->data);
+        }
+        printf("区间[%s ~ %s] 签约数:%d 有效租约:%d 平均月租:%.2f 平均租期:%.2f天\n",
+               start, end, cnt, active,
+               cnt ? rentSum / cnt : 0.0,
+               cnt ? durationSum / cnt : 0.0);
     }
 }
 
@@ -4950,8 +5262,8 @@ static void admin_category_menu(void) {
 
 /* 功能: 全量预约排序；输入: 排序策略；输出: 无 */
 static void sort_viewings_all(void) {
-    printf("排序属性: 1.时间  2.时长  3.状态(同状态再按时间)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.时间  2.时长  3.状态(同状态再按时间)  4.多属性(状态->时间->时长)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     Viewing *arr;
     int n = g_db.viewingCount;
@@ -4978,9 +5290,14 @@ static void sort_viewings_all(void) {
             } else if (mode == 2) {
                 swap = (ord == 1) ? (arr[j].durationMinutes > arr[j + 1].durationMinutes)
                                   : (arr[j].durationMinutes < arr[j + 1].durationMinutes);
+            } else if (mode == 3) {
+                int c = arr[j].status - arr[j + 1].status;
+                if (c == 0) c = strcmp(arr[j].datetime, arr[j + 1].datetime);
+                swap = (ord == 1) ? (c > 0) : (c < 0);
             } else {
                 int c = arr[j].status - arr[j + 1].status;
                 if (c == 0) c = strcmp(arr[j].datetime, arr[j + 1].datetime);
+                if (c == 0) c = arr[j].durationMinutes - arr[j + 1].durationMinutes;
                 swap = (ord == 1) ? (c > 0) : (c < 0);
             }
             if (swap) {
@@ -4998,8 +5315,8 @@ static void sort_viewings_all(void) {
 
 /* 功能: 全量租约排序；输入: 排序策略；输出: 无 */
 static void sort_rentals_all(void) {
-    printf("排序属性: 1.合同日期  2.月租  3.起租日期(同日起再按月租)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.合同日期  2.月租  3.起租日期(同日起再按月租)  4.多属性(状态->合同日期->月租)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     Rental *arr;
     int n = g_db.rentalCount;
@@ -5026,8 +5343,16 @@ static void sort_rentals_all(void) {
             } else if (mode == 2) {
                 swap = (ord == 1) ? (arr[j].monthlyRent > arr[j + 1].monthlyRent)
                                   : (arr[j].monthlyRent < arr[j + 1].monthlyRent);
-            } else {
+            } else if (mode == 3) {
                 int c = compare_date_str(arr[j].startDate, arr[j + 1].startDate);
+                if (c == 0) {
+                    if (arr[j].monthlyRent < arr[j + 1].monthlyRent) c = -1;
+                    else if (arr[j].monthlyRent > arr[j + 1].monthlyRent) c = 1;
+                }
+                swap = (ord == 1) ? (c > 0) : (c < 0);
+            } else {
+                int c = arr[j].status - arr[j + 1].status;
+                if (c == 0) c = compare_date_str(arr[j].contractDate, arr[j + 1].contractDate);
                 if (c == 0) {
                     if (arr[j].monthlyRent < arr[j + 1].monthlyRent) c = -1;
                     else if (arr[j].monthlyRent > arr[j + 1].monthlyRent) c = 1;
@@ -5058,7 +5383,7 @@ static void admin_sort_menu(void) {
 
 /* 功能: 管理员统计菜单；输入: 无；输出: 无 */
 static void admin_statistics_menu(void) {
-    int ch = input_int("1房源统计 2看房统计 3租约统计 4租客租房统计 5按月统计签约: ", 1, 5);
+    int ch = input_int("1房源统计 2看房统计 3租约统计 4租客租房统计 5按月统计签约 6按日期区间统计出租率 7按日期区间统计租约: ", 1, 7);
     if (ch == 1) {
         HouseNode *h;
         int total = 0, vacant = 0, rented = 0, pending = 0, offline = 0;
@@ -5122,7 +5447,7 @@ static void admin_statistics_menu(void) {
             if (r->data.status == RENTAL_ACTIVE) active++;
         }
         printf("租客ID:%d 租约数:%d 当前有效:%d 累计月租:%.2f\n", tenantId, cnt, active, rentSum);
-    } else {
+    } else if (ch == 5) {
         char month[8];
         RentalNode *r;
         int cnt = 0;
@@ -5135,6 +5460,69 @@ static void admin_statistics_menu(void) {
             if (strncmp(r->data.contractDate, month, 7) == 0) cnt++;
         }
         printf("月份:%s 签约数量:%d\n", month, cnt);
+    } else if (ch == 6) {
+        char start[11], end[11];
+        time_t winStart, winEnd;
+        HouseNode *h;
+        int total = 0;
+        int occupied = 0;
+        if (!input_date_range(start, end)) return;
+        winStart = date_to_time(start);
+        winEnd = date_to_time(end);
+        if (winStart == (time_t)-1 || winEnd == (time_t)-1) {
+            printf("日期解析失败。\n");
+            return;
+        }
+        winEnd += 86400;
+        for (h = g_db.houses; h; h = h->next) {
+            RentalNode *r;
+            int hasOverlap = 0;
+            if (h->data.status == HOUSE_PENDING || h->data.status == HOUSE_OFFLINE) continue;
+            total++;
+            for (r = g_db.rentals; r; r = r->next) {
+                time_t rs, re;
+                if (r->data.houseId != h->data.id) continue;
+                if (r->data.signStatus != RENTAL_SIGN_CONFIRMED) continue;
+                rs = date_to_time(r->data.startDate);
+                re = date_to_time(r->data.endDate);
+                if (rs == (time_t)-1 || re == (time_t)-1 || re <= rs) continue;
+                re += 86400;
+                if (overlap_days(rs, re, winStart, winEnd) > 0.0) {
+                    hasOverlap = 1;
+                    break;
+                }
+            }
+            if (hasOverlap) occupied++;
+        }
+        printf("区间[%s ~ %s] 可统计房源:%d 区间内有出租房源:%d 出租率:%.2f%%\n",
+               start, end, total, occupied, total ? (double)occupied * 100.0 / total : 0.0);
+    } else {
+        char start[11], end[11];
+        time_t winStart, winEnd;
+        RentalNode *r;
+        int cnt = 0;
+        double rentSum = 0.0;
+        double durationSum = 0.0;
+        if (!input_date_range(start, end)) return;
+        winStart = date_to_time(start);
+        winEnd = date_to_time(end);
+        if (winStart == (time_t)-1 || winEnd == (time_t)-1) {
+            printf("日期解析失败。\n");
+            return;
+        }
+        winEnd += 86400;
+        for (r = g_db.rentals; r; r = r->next) {
+            time_t contractTs;
+            if (r->data.signStatus != RENTAL_SIGN_CONFIRMED) continue;
+            contractTs = date_to_time(r->data.contractDate);
+            if (contractTs == (time_t)-1) continue;
+            if (contractTs < winStart || contractTs >= winEnd) continue;
+            cnt++;
+            rentSum += r->data.monthlyRent;
+            durationSum += rental_duration_days(&r->data);
+        }
+        printf("区间[%s ~ %s] 已签租约:%d 平均月租:%.2f 平均租期:%.2f天\n",
+               start, end, cnt, cnt ? rentSum / cnt : 0.0, cnt ? durationSum / cnt : 0.0);
     }
 }
 
