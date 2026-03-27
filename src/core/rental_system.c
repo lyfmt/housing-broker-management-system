@@ -1855,30 +1855,226 @@ static void list_rentals_all(void) {
     }
 }
 
-/* 功能: 管理员按签约状态筛选租约列表；输入: 无；输出: 无 */
+/* 功能: 管理员租约查询中心（简单/模糊/组合）；输入: 无；输出: 无 */
 static void list_rentals_admin_filtered(void) {
-    printf("签约状态筛选: 0.全部  1.待签  2.已签  3.拒签  4.撤销\n");
-    int filter = input_int("请选择签约状态编号: ", 0, 4);
+    int mode;
     RentalNode *r;
     int cnt = 0;
+    printf("查询属性: 1.租约ID  2.租客ID  3.中介ID  4.房源ID  5.履约状态  6.签约状态  7.合同日期范围  8.关键字模糊  9.组合查询  10.全部\n");
+    mode = input_int("请选择查询属性编号: ", 1, 10);
+
     if (!reload_database_for_sync()) {
         printf("数据同步失败，无法查询最新租约记录。\n");
         return;
     }
-    if (filter == 0) {
+
+    if (mode == 1) {
+        int id = input_int("租约ID: ", 1, 99999999);
+        r = find_rental(id);
+        if (!r) {
+            printf("未找到。\n");
+            return;
+        }
+        print_rental_detailed(&r->data);
+        return;
+    }
+
+    if (mode == 2) {
+        int tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+        for (r = g_db.rentals; r; r = r->next) {
+            if (r->data.tenantId != tenantId) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 3) {
+        int agentId = input_int("中介ID: ", 1, 99999999);
+        for (r = g_db.rentals; r; r = r->next) {
+            if (r->data.agentId != agentId) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 4) {
+        int houseId = input_int("房源ID: ", 1, 99999999);
+        for (r = g_db.rentals; r; r = r->next) {
+            if (r->data.houseId != houseId) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 5) {
+        int st;
+        printf("履约状态可选: 0.有效  1.已到期  2.提前退租\n");
+        st = input_int("请选择履约状态编号: ", 0, 2);
+        for (r = g_db.rentals; r; r = r->next) {
+            if (r->data.status != st) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 6) {
+        int signSt;
+        printf("签约状态可选: 0.待签  1.已签  2.拒签  3.撤销\n");
+        signSt = input_int("请选择签约状态编号: ", 0, 3);
+        for (r = g_db.rentals; r; r = r->next) {
+            if (r->data.signStatus != signSt) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 7) {
+        char start[11], end[11];
+        while (1) {
+            input_non_empty("签约开始日期(YYYY-MM-DD): ", start, sizeof(start));
+            if (validate_date(start)) break;
+            printf("日期格式错误。\n");
+        }
+        while (1) {
+            input_non_empty("签约结束日期(YYYY-MM-DD): ", end, sizeof(end));
+            if (validate_date(end)) break;
+            printf("日期格式错误。\n");
+        }
+        if (compare_date_str(end, start) < 0) {
+            printf("结束日期不能早于开始日期。\n");
+            return;
+        }
+        if (!reload_database_for_sync()) {
+            printf("数据同步失败，无法查询最新租约记录。\n");
+            return;
+        }
+        for (r = g_db.rentals; r; r = r->next) {
+            if (compare_date_str(r->data.contractDate, start) < 0) continue;
+            if (compare_date_str(r->data.contractDate, end) > 0) continue;
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 8) {
+        char kw[MAX_STR];
+        input_non_empty("关键字(日期/状态/条款/拒签原因/ID): ", kw, sizeof(kw));
+        if (!reload_database_for_sync()) {
+            printf("数据同步失败，无法查询最新租约记录。\n");
+            return;
+        }
+        for (r = g_db.rentals; r; r = r->next) {
+            char idBuf[32], houseBuf[32], tenantBuf[32], agentBuf[32], appointBuf[32];
+            const char *tenantName = "";
+            TenantNode *t = find_tenant(r->data.tenantId);
+            if (t) tenantName = t->data.name;
+            snprintf(idBuf, sizeof(idBuf), "%d", r->data.id);
+            snprintf(houseBuf, sizeof(houseBuf), "%d", r->data.houseId);
+            snprintf(tenantBuf, sizeof(tenantBuf), "%d", r->data.tenantId);
+            snprintf(agentBuf, sizeof(agentBuf), "%d", r->data.agentId);
+            snprintf(appointBuf, sizeof(appointBuf), "%d", r->data.appointmentId);
+            if (!contains_case_insensitive(r->data.contractDate, kw) &&
+                !contains_case_insensitive(r->data.startDate, kw) &&
+                !contains_case_insensitive(r->data.endDate, kw) &&
+                !contains_case_insensitive(r->data.otherTerms, kw) &&
+                !contains_case_insensitive(r->data.rejectReason, kw) &&
+                !contains_case_insensitive(rental_sign_state_text(r->data.signStatus), kw) &&
+                !contains_case_insensitive(rental_state_text(r->data.status), kw) &&
+                !contains_case_insensitive(tenantName, kw) &&
+                !contains_case_insensitive(idBuf, kw) &&
+                !contains_case_insensitive(houseBuf, kw) &&
+                !contains_case_insensitive(tenantBuf, kw) &&
+                !contains_case_insensitive(agentBuf, kw) &&
+                !contains_case_insensitive(appointBuf, kw)) {
+                continue;
+            }
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else if (mode == 9) {
+        int enableTenant = 0;
+        int enableAgent = 0;
+        int enableHouse = 0;
+        int enableStatus = 0;
+        int enableSign = 0;
+        int enableDate = 0;
+        int enableKeyword = 0;
+        int tenantId = 0;
+        int agentId = 0;
+        int houseId = 0;
+        int st = 0;
+        int signSt = 0;
+        char start[11] = "";
+        char end[11] = "";
+        char kw[MAX_STR] = "";
+
+        enableTenant = input_yes_no("按租客ID过滤?");
+        if (enableTenant) tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+        enableAgent = input_yes_no("按中介ID过滤?");
+        if (enableAgent) agentId = input_int("中介ID: ", 1, 99999999);
+        enableHouse = input_yes_no("按房源ID过滤?");
+        if (enableHouse) houseId = input_int("房源ID: ", 1, 99999999);
+        enableStatus = input_yes_no("按履约状态过滤?");
+        if (enableStatus) st = input_int("履约状态(0有效 1已到期 2提前退租): ", 0, 2);
+        enableSign = input_yes_no("按签约状态过滤?");
+        if (enableSign) signSt = input_int("签约状态(0待签 1已签 2拒签 3撤销): ", 0, 3);
+        enableDate = input_yes_no("按合同日期范围过滤?");
+        if (enableDate) {
+            while (1) {
+                input_non_empty("签约开始日期(YYYY-MM-DD): ", start, sizeof(start));
+                if (validate_date(start)) break;
+                printf("日期格式错误。\n");
+            }
+            while (1) {
+                input_non_empty("签约结束日期(YYYY-MM-DD): ", end, sizeof(end));
+                if (validate_date(end)) break;
+                printf("日期格式错误。\n");
+            }
+            if (compare_date_str(end, start) < 0) {
+                printf("结束日期不能早于开始日期。\n");
+                return;
+            }
+        }
+        enableKeyword = input_yes_no("按关键字模糊过滤?");
+        if (enableKeyword) input_non_empty("关键字(日期/状态/条款/拒签原因/ID): ", kw, sizeof(kw));
+
+        if (!reload_database_for_sync()) {
+            printf("数据同步失败，无法查询最新租约记录。\n");
+            return;
+        }
+        for (r = g_db.rentals; r; r = r->next) {
+            char idBuf[32], houseBuf[32], tenantBuf[32], agentBuf[32], appointBuf[32];
+            const char *tenantName = "";
+            TenantNode *t = find_tenant(r->data.tenantId);
+            if (t) tenantName = t->data.name;
+            if (enableTenant && r->data.tenantId != tenantId) continue;
+            if (enableAgent && r->data.agentId != agentId) continue;
+            if (enableHouse && r->data.houseId != houseId) continue;
+            if (enableStatus && r->data.status != st) continue;
+            if (enableSign && r->data.signStatus != signSt) continue;
+            if (enableDate) {
+                if (compare_date_str(r->data.contractDate, start) < 0) continue;
+                if (compare_date_str(r->data.contractDate, end) > 0) continue;
+            }
+            if (enableKeyword) {
+                snprintf(idBuf, sizeof(idBuf), "%d", r->data.id);
+                snprintf(houseBuf, sizeof(houseBuf), "%d", r->data.houseId);
+                snprintf(tenantBuf, sizeof(tenantBuf), "%d", r->data.tenantId);
+                snprintf(agentBuf, sizeof(agentBuf), "%d", r->data.agentId);
+                snprintf(appointBuf, sizeof(appointBuf), "%d", r->data.appointmentId);
+                if (!contains_case_insensitive(r->data.contractDate, kw) &&
+                    !contains_case_insensitive(r->data.startDate, kw) &&
+                    !contains_case_insensitive(r->data.endDate, kw) &&
+                    !contains_case_insensitive(r->data.otherTerms, kw) &&
+                    !contains_case_insensitive(r->data.rejectReason, kw) &&
+                    !contains_case_insensitive(rental_sign_state_text(r->data.signStatus), kw) &&
+                    !contains_case_insensitive(rental_state_text(r->data.status), kw) &&
+                    !contains_case_insensitive(tenantName, kw) &&
+                    !contains_case_insensitive(idBuf, kw) &&
+                    !contains_case_insensitive(houseBuf, kw) &&
+                    !contains_case_insensitive(tenantBuf, kw) &&
+                    !contains_case_insensitive(agentBuf, kw) &&
+                    !contains_case_insensitive(appointBuf, kw)) {
+                    continue;
+                }
+            }
+            print_rental_detailed(&r->data);
+            cnt++;
+        }
+    } else {
         list_rentals_all();
         return;
     }
-    ui_section("租约列表(签约状态筛选)");
-    for (r = g_db.rentals; r; r = r->next) {
-        if (filter == 1 && r->data.signStatus != RENTAL_SIGN_PENDING) continue;
-        if (filter == 2 && r->data.signStatus != RENTAL_SIGN_CONFIRMED) continue;
-        if (filter == 3 && r->data.signStatus != RENTAL_SIGN_REJECTED) continue;
-        if (filter == 4 && r->data.signStatus != RENTAL_SIGN_CANCELLED) continue;
-        print_rental_detailed(&r->data);
-        cnt++;
-    }
-    if (!cnt) printf("无匹配租约。\n");
+
+    if (!cnt) printf("未找到。\n");
 }
 
 /* 功能: 管理员查看全部已签订合同；输入: 无；输出: 无 */
@@ -5463,36 +5659,45 @@ static void admin_menu(void) {
         int needSave = 0;
         printf("\n====== 管理员菜单 ======\n");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
+        printf("\n[信息管理]\n");
         printf("1. 信息管理-中介新增\n");
         printf("2. 信息管理-中介修改\n");
         printf("3. 信息管理-中介删除\n");
-        printf("4. 信息查询-中介\n");
-        printf("5. 信息查询-租客\n");
         printf("6. 信息管理-租客修改\n");
         printf("7. 信息管理-租客删除\n");
-        printf("8. 系统维护-重置租客密码\n");
         printf("9. 信息管理-新增房源(免审上架)\n");
         printf("10. 信息管理-修改房源\n");
         printf("11. 信息管理-删除房源\n");
-        printf("12. 看房管理-审核中介提交房源\n");
+        printf("25. 信息管理-分类信息管理\n");
+
+        printf("\n[信息查询]\n");
+        printf("4. 信息查询-中介\n");
+        printf("5. 信息查询-租客\n");
         printf("13. 信息查询-房源列表\n");
         printf("14. 信息查询-组合查房\n");
-        printf("15. 信息排序\n");
-        printf("16. 看房管理-分配中介\n");
         printf("17. 信息查询-看房记录(简单/模糊/组合)\n");
-        printf("18. 信息查询-租约记录\n");
-        printf("19. 租房管理-租约状态管理\n");
+        printf("18. 信息查询-租约记录(简单/模糊/组合)\n");
         printf("20. 信息查询-按签约日期查租约\n");
         printf("21. 信息查询-房源时段可预约性\n");
+        printf("30. 信息查询-已签订合同(全部)\n");
+
+        printf("\n[看房/租房管理]\n");
+        printf("12. 看房管理-审核中介提交房源\n");
+        printf("16. 看房管理-分配中介\n");
+        printf("19. 租房管理-租约状态管理\n");
+
+        printf("\n[系统维护]\n");
+        printf("8. 系统维护-重置租客密码\n");
         printf("22. 系统维护-重置中介密码\n");
         printf("23. 系统维护-保存当前数据\n");
-        printf("24. 其他-生成演示数据\n");
-        printf("25. 信息管理-分类信息管理\n");
-        printf("26. 信息统计\n");
         printf("27. 系统维护-修改管理员密码\n");
         printf("28. 系统维护-备份到指定文件\n");
         printf("29. 系统维护-从指定文件恢复\n");
-        printf("30. 信息查询-已签订合同(全部)\n");
+
+        printf("\n[统计与其他]\n");
+        printf("15. 信息排序\n");
+        printf("24. 其他-生成演示数据\n");
+        printf("26. 信息统计\n");
         printf("0. 退出登录\n");
         ch = input_int("请选择菜单编号: ", 0, 30);
         if (ch == 0) {
