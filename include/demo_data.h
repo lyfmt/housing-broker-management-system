@@ -1,6 +1,12 @@
 #ifndef DEMO_DATA_H
 #define DEMO_DATA_H
 
+/*
+ * 文件: demo_data.h
+ * 定义内容: 演示数据条目结构体与只读访问接口声明。
+ * 后续用途: 启动补数、课堂演示、统计与查询功能回归验证。
+ */
+
 #include <stddef.h>
 
 typedef struct {
@@ -73,6 +79,7 @@ typedef struct {
     int signStatus;
 } DemoRentalEntry;
 
+/* 以下接口返回只读演示数据数组，并通过 count 返回条目数。 */
 const char *const *demo_regions(size_t *count);
 const char *const *demo_floor_notes(size_t *count);
 const char *const *demo_orientations(size_t *count);

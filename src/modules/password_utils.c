@@ -1,3 +1,8 @@
+/*
+ * 文件: password_utils.c
+ * 定义内容: 密码哈希存储、验证、临时密码生成与旧口令迁移实现。
+ * 后续用途: 为认证模块提供统一密码能力，后续可替换哈希策略而不影响业务层调用。
+ */
 #include "password_utils.h"
 
 #include <stdint.h>

@@ -1,6 +1,12 @@
 #ifndef UI_UTILS_H
 #define UI_UTILS_H
 
+/*
+ * 文件: ui_utils.h
+ * 定义内容: 终端 UI 辅助能力（颜色输出、分隔线、分页、加载动画）。
+ * 后续用途: 提升交互一致性，减少业务层重复书写显示代码。
+ */
+
 #include <stdio.h>
 #include "platform_compat.h"
 

@@ -1,3 +1,8 @@
+/*
+ * 文件: rental_system.c
+ * 定义内容: 系统核心业务实现，覆盖登录、菜单路由、增删改查、查询排序、统计与流程校验。
+ * 后续用途: 作为课程项目主业务引擎，后续功能迭代（新角色权限、报表、流程规则）优先在此扩展。
+ */
 #include <ctype.h>
 #include <stdint.h>
 #include <setjmp.h>
@@ -71,11 +76,18 @@ static int house_is_open_for_viewing(const House *h);
 static int appointment_time_is_in_future(const char *dt);
 static void format_viewing_feedback(char *out, size_t size, const char *action, const char *now, const char *detail);
 static void secure_zero(void *ptr, size_t len);
+static int extract_date_from_datetime(const char *datetime, char out[11]);
+static int date_in_optional_range(const char *date, const char *start, const char *end, int enabled);
 static void fill_end_date_by_term(const char *startDate, int leaseTerm, char endDate[11]);
 static int count_pending_contract_for_triplet(int houseId, int tenantId, int agentId);
 static void add_rental_for_agent_with_viewing(int agentId, int presetViewingId);
 static void agent_contract_workbench_menu(int agentId);
 static int tenant_has_completed_viewing_without_contract(int tenantId);
+static void tenant_booking_entry_menu(int tenantId);
+static void tenant_statistics_multi_dimension(int tenantId);
+static void agent_statistics_multi_dimension(int agentId);
+static void admin_statistics_multi_dimension(void);
+static void admin_query_viewings(void);
 
 /* 功能: 判断中介ID是否已在数组中；输入: ids/n/id；输出: 1存在/0不存在 */
 static int id_in_list(const int *ids, int n, int id) {
@@ -323,7 +335,13 @@ static int appointment_time_is_in_future(const char *dt) {
     return difftime(target, now) > 0.0;
 }
 
-/* 功能: 读取统计日期区间；输入: start/end；输出: 1成功/0失败 */
+/*
+ * 功能: 读取并校验统计日期区间。
+ * 实现内容: 循环读取开始/结束日期，保证日期格式正确且结束不早于开始。
+ * 后续用途:
+ * 1) 统计菜单中的区间筛选统一入口。
+ * 2) 避免各业务函数重复编写日期输入与边界校验逻辑。
+ */
 static int input_date_range(char start[11], char end[11]) {
     while (1) {
         input_non_empty("开始日期(YYYY-MM-DD): ", start, 11);
@@ -339,6 +357,35 @@ static int input_date_range(char start[11], char end[11]) {
         printf("结束日期不能早于开始日期。\n");
         return 0;
     }
+    return 1;
+}
+
+/*
+ * 功能: 从预约时间字符串中提取日期部分。
+ * 实现内容: 将 YYYY-MM-DD HH:MM 的前10位复制为 YYYY-MM-DD 并做日期合法性校验。
+ * 后续用途:
+ * 1) 看房记录与租约记录统一按“日期区间”统计。
+ * 2) 作为多属性查询/统计中的时间维度预处理步骤。
+ */
+static int extract_date_from_datetime(const char *datetime, char out[11]) {
+    if (!datetime || strlen(datetime) < 10 || !out) return 0;
+    memcpy(out, datetime, 10);
+    out[10] = '\0';
+    return validate_date(out);
+}
+
+/*
+ * 功能: 判断某日期是否命中“可选启用”的区间过滤条件。
+ * 实现内容: enabled=0 时直接放行；enabled=1 时执行格式校验与闭区间比较。
+ * 后续用途:
+ * 1) 多属性查询/统计中统一处理“是否开启日期过滤”。
+ * 2) 减少 if-else 分支重复，降低筛选逻辑维护成本。
+ */
+static int date_in_optional_range(const char *date, const char *start, const char *end, int enabled) {
+    if (!enabled) return 1;
+    if (!date || !validate_date(date)) return 0;
+    if (compare_date_str(date, start) < 0) return 0;
+    if (compare_date_str(date, end) > 0) return 0;
     return 1;
 }
 
@@ -1553,19 +1600,23 @@ static void list_agents(void) {
         }
         printf("+------+----------+------+-------------+\n");
     } else {
-        printf("+------+----------+\n");
+        printf("+------+----------+------+-------------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
-        print_table_cell_utf8("姓名", 8); printf(" |\n");
-        printf("+------+----------+\n");
+        print_table_cell_utf8("姓名", 8); printf(" | ");
+        print_table_cell_utf8("性别", 4); printf(" | ");
+        print_table_cell_utf8("电话", 11); printf(" |\n");
+        printf("+------+----------+------+-------------+\n");
         for (a = g_db.agents; a; a = a->next) {
             char idBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", a->data.id);
             printf("| "); print_table_cell_utf8(idBuf, 4); printf(" | ");
-            print_table_cell_utf8(a->data.name, 8); printf(" |\n");
+            print_table_cell_utf8(a->data.name, 8); printf(" | ");
+            print_table_cell_utf8(a->data.gender[0] ? a->data.gender : "-", 4); printf(" | ");
+            print_table_cell_utf8(a->data.phone, 11); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+------+----------+\n");
+        printf("+------+----------+------+-------------+\n");
     }
 }
 
@@ -1617,19 +1668,23 @@ static void list_tenants(void) {
         }
         printf("+--------+----------+------+-------------+\n");
     } else {
-        printf("+--------+----------+\n");
+        printf("+--------+----------+------+-------------+\n");
         printf("| "); print_table_cell_utf8("ID", 6); printf(" | ");
-        print_table_cell_utf8("姓名", 8); printf(" |\n");
-        printf("+--------+----------+\n");
+        print_table_cell_utf8("姓名", 8); printf(" | ");
+        print_table_cell_utf8("性别", 4); printf(" | ");
+        print_table_cell_utf8("电话", 11); printf(" |\n");
+        printf("+--------+----------+------+-------------+\n");
         for (t = g_db.tenants; t; t = t->next) {
             char idBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", t->data.id);
             printf("| "); print_table_cell_utf8(idBuf, 6); printf(" | ");
-            print_table_cell_utf8(t->data.name, 8); printf(" |\n");
+            print_table_cell_utf8(t->data.name, 8); printf(" | ");
+            print_table_cell_utf8(t->data.gender[0] ? t->data.gender : "-", 4); printf(" | ");
+            print_table_cell_utf8(t->data.phone, 11); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+--------+----------+\n");
+        printf("+--------+----------+------+-------------+\n");
     }
 }
 
@@ -1681,21 +1736,30 @@ static void list_viewings_all(void) {
         }
         printf("+------+------------------+------+--------+------+--------+----------+\n");
     } else {
-        printf("+------+------------------+--------+\n");
+        printf("+------+------------------+--------+--------+--------+--------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
         print_table_cell_utf8("时间", 16); printf(" | ");
+        print_table_cell_utf8("房源ID", 6); printf(" | ");
+        print_table_cell_utf8("租客ID", 6); printf(" | ");
+        print_table_cell_utf8("中介ID", 6); printf(" | ");
         print_table_cell_utf8("状态", 6); printf(" |\n");
-        printf("+------+------------------+--------+\n");
+        printf("+------+------------------+--------+--------+--------+--------+\n");
         for (v = g_db.viewings; v; v = v->next) {
-            char idBuf[16];
+            char idBuf[16], houseBuf[16], tenantBuf[16], agentBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", v->data.id);
+            snprintf(houseBuf, sizeof(houseBuf), "%d", v->data.houseId);
+            snprintf(tenantBuf, sizeof(tenantBuf), "%d", v->data.tenantId);
+            snprintf(agentBuf, sizeof(agentBuf), "%d", v->data.agentId);
             printf("| "); print_table_cell_utf8(idBuf, 4); printf(" | ");
             print_table_cell_utf8(v->data.datetime, 16); printf(" | ");
+            print_table_cell_utf8(houseBuf, 6); printf(" | ");
+            print_table_cell_utf8(tenantBuf, 6); printf(" | ");
+            print_table_cell_utf8(agentBuf, 6); printf(" | ");
             print_table_cell_utf8(viewing_state_text(v->data.status), 6); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+------+------------------+--------+\n");
+        printf("+------+------------------+--------+--------+--------+--------+\n");
     }
 }
 
@@ -1739,14 +1803,14 @@ static void list_rentals_all(void) {
         }
         printf("+------+--------+--------+------+------------+------------+----------+----------+----------+\n");
     } else if (width >= 80) {
-        printf("+------+--------+---+---+--------+--------+\n");
+        printf("+------+--------+------+------+--------+--------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
         print_table_cell_utf8("房源", 6); printf(" | ");
-        print_table_cell_utf8("客", 1); printf(" | ");
-        print_table_cell_utf8("介", 1); printf(" | ");
+        print_table_cell_utf8("租客", 4); printf(" | ");
+        print_table_cell_utf8("中介", 4); printf(" | ");
         print_table_cell_utf8("签约", 6); printf(" | ");
         print_table_cell_utf8("状态", 6); printf(" |\n");
-        printf("+------+--------+---+---+--------+--------+\n");
+        printf("+------+--------+------+------+--------+--------+\n");
         for (r = g_db.rentals; r; r = r->next) {
             char idBuf[16], houseBuf[16], tenantBuf[16], agentBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", r->data.id);
@@ -1755,29 +1819,39 @@ static void list_rentals_all(void) {
             snprintf(agentBuf, sizeof(agentBuf), "%d", r->data.agentId);
             printf("| "); print_table_cell_utf8(idBuf, 4); printf(" | ");
             print_table_cell_utf8(houseBuf, 6); printf(" | ");
-            print_table_cell_utf8(tenantBuf, 1); printf(" | ");
-            print_table_cell_utf8(agentBuf, 1); printf(" | ");
+            print_table_cell_utf8(tenantBuf, 4); printf(" | ");
+            print_table_cell_utf8(agentBuf, 4); printf(" | ");
             print_table_cell_utf8(rental_sign_state_text(r->data.signStatus), 6); printf(" | ");
             print_table_cell_utf8(rental_state_text(r->data.status), 6); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+------+--------+---+---+--------+--------+\n");
+        printf("+------+--------+------+------+--------+--------+\n");
     } else {
-        printf("+------+---+\n");
+        printf("+------+--------+------+------+--------+--------+\n");
         printf("| "); print_table_cell_utf8("ID", 4); printf(" | ");
-        print_table_cell_utf8("状态", 1); printf(" |\n");
-        printf("+------+---+\n");
+        print_table_cell_utf8("房源", 6); printf(" | ");
+        print_table_cell_utf8("租客", 4); printf(" | ");
+        print_table_cell_utf8("中介", 4); printf(" | ");
+        print_table_cell_utf8("签约", 6); printf(" | ");
+        print_table_cell_utf8("状态", 6); printf(" |\n");
+        printf("+------+--------+------+------+--------+--------+\n");
         for (r = g_db.rentals; r; r = r->next) {
-            char idBuf[16];
+            char idBuf[16], houseBuf[16], tenantBuf[16], agentBuf[16];
             snprintf(idBuf, sizeof(idBuf), "%d", r->data.id);
+            snprintf(houseBuf, sizeof(houseBuf), "%d", r->data.houseId);
+            snprintf(tenantBuf, sizeof(tenantBuf), "%d", r->data.tenantId);
+            snprintf(agentBuf, sizeof(agentBuf), "%d", r->data.agentId);
             printf("| "); print_table_cell_utf8(idBuf, 4); printf(" | ");
-            const char *status = rental_state_text(r->data.status);
-            printf("%c", status[0]); printf(" |\n");
+            print_table_cell_utf8(houseBuf, 6); printf(" | ");
+            print_table_cell_utf8(tenantBuf, 4); printf(" | ");
+            print_table_cell_utf8(agentBuf, 4); printf(" | ");
+            print_table_cell_utf8(rental_sign_state_text(r->data.signStatus), 6); printf(" | ");
+            print_table_cell_utf8(rental_state_text(r->data.status), 6); printf(" |\n");
             shown++;
             if (!ui_page_break_if_needed(shown)) break;
         }
-        printf("+------+---+\n");
+        printf("+------+--------+------+------+--------+--------+\n");
     }
 }
 
@@ -1787,6 +1861,10 @@ static void list_rentals_admin_filtered(void) {
     int filter = input_int("请选择签约状态编号: ", 0, 4);
     RentalNode *r;
     int cnt = 0;
+    if (!reload_database_for_sync()) {
+        printf("数据同步失败，无法查询最新租约记录。\n");
+        return;
+    }
     if (filter == 0) {
         list_rentals_all();
         return;
@@ -1801,6 +1879,23 @@ static void list_rentals_admin_filtered(void) {
         cnt++;
     }
     if (!cnt) printf("无匹配租约。\n");
+}
+
+/* 功能: 管理员查看全部已签订合同；输入: 无；输出: 无 */
+static void list_rentals_signed_all(void) {
+    RentalNode *r;
+    int cnt = 0;
+    if (!reload_database_for_sync()) {
+        printf("数据同步失败，无法查询最新租约记录。\n");
+        return;
+    }
+    ui_section("已签订合同列表");
+    for (r = g_db.rentals; r; r = r->next) {
+        if (r->data.signStatus != RENTAL_SIGN_CONFIRMED) continue;
+        print_rental_detailed(&r->data);
+        cnt++;
+    }
+    if (!cnt) printf("暂无已签订合同。\n");
 }
 
 /* 功能: 按合同日期范围查询租约；输入: 开始/结束日期；输出: 无 */
@@ -2661,6 +2756,24 @@ static void add_viewing_for_tenant(int tenantId) {
     search_houses_for_tenant(tenantId);
 }
 
+/* 功能: 租客预约入口（先查时段可约，再预约）；输入: tenantId；输出: 无 */
+static void tenant_booking_entry_menu(int tenantId) {
+    int ch;
+    while (1) {
+        printf("\n--- 租客预约入口 ---\n");
+        printf("1. 查询房源并预约(推荐)\n");
+        printf("2. 查询某房源某时间段是否可预约\n");
+        printf("0. 返回\n");
+        ch = input_int("请选择操作编号: ", 0, 2);
+        if (ch == 0) return;
+        if (ch == 1) {
+            add_viewing_for_tenant(tenantId);
+            return;
+        }
+        query_house_availability_by_time();
+    }
+}
+
 /* 功能: 中介发起租约（待租客确认）；输入: agentId；输出: 无 */
 static void add_rental_for_agent_with_viewing(int agentId, int presetViewingId) {
     Rental r;
@@ -3069,6 +3182,185 @@ static void query_agent_viewings(int agentId) {
     if (!cnt) printf("未找到。\n");
 }
 
+/*
+ * 功能: 管理员看房记录查询中心（简单/模糊/组合）。
+ * 实现内容: 提供按看房ID、租客ID、中介ID、房源ID、状态、时间范围、关键字、
+ * 多条件组合等方式查询看房记录，并支持查看全部。
+ * 后续用途:
+ * 1) 满足管理端审计追踪与问题排查场景。
+ * 2) 作为“查询某租客预约记录/某中介预约记录”的统一入口。
+ */
+static void admin_query_viewings(void) {
+    int mode;
+    ViewingNode *v;
+    int cnt = 0;
+    printf("查询属性: 1.看房ID  2.租客ID  3.中介ID  4.房源ID  5.状态  6.时间范围  7.关键字模糊  8.组合查询  9.全部\n");
+    mode = input_int("请选择查询属性编号: ", 1, 9);
+
+    if (mode == 1) {
+        int id = input_int("看房ID: ", 1, 99999999);
+        v = find_viewing(id);
+        if (!v) {
+            printf("未找到。\n");
+            return;
+        }
+        print_viewing_detailed(&v->data);
+        return;
+    }
+
+    if (mode == 2) {
+        int tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+        for (v = g_db.viewings; v; v = v->next) {
+            if (v->data.tenantId != tenantId) continue;
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else if (mode == 3) {
+        int agentId = input_int("中介ID: ", 1, 99999999);
+        for (v = g_db.viewings; v; v = v->next) {
+            if (v->data.agentId != agentId) continue;
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else if (mode == 4) {
+        int houseId = input_int("房源ID: ", 1, 99999999);
+        for (v = g_db.viewings; v; v = v->next) {
+            if (v->data.houseId != houseId) continue;
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else if (mode == 5) {
+        int st;
+        printf("看房状态可选: 0.待确认  1.已确认  2.已完成  3.已取消  4.未赴约\n");
+        st = input_int("请选择状态编号: ", 0, 4);
+        for (v = g_db.viewings; v; v = v->next) {
+            if (v->data.status != st) continue;
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else if (mode == 6) {
+        char start[20], end[20];
+        while (1) {
+            input_non_empty("开始时间(YYYY-MM-DD HH:MM): ", start, sizeof(start));
+            if (validate_datetime(start)) break;
+            printf("时间格式错误。\n");
+        }
+        while (1) {
+            input_non_empty("结束时间(YYYY-MM-DD HH:MM): ", end, sizeof(end));
+            if (validate_datetime(end)) break;
+            printf("时间格式错误。\n");
+        }
+        if (strcmp(end, start) < 0) {
+            printf("结束时间不能早于开始时间。\n");
+            return;
+        }
+        for (v = g_db.viewings; v; v = v->next) {
+            if (strcmp(v->data.datetime, start) < 0) continue;
+            if (strcmp(v->data.datetime, end) > 0) continue;
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else if (mode == 7) {
+        char kw[MAX_STR];
+        input_non_empty("关键字(时间/反馈/状态/ID): ", kw, sizeof(kw));
+        for (v = g_db.viewings; v; v = v->next) {
+            char idBuf[32], houseBuf[32], tenantBuf[32], agentBuf[32];
+            snprintf(idBuf, sizeof(idBuf), "%d", v->data.id);
+            snprintf(houseBuf, sizeof(houseBuf), "%d", v->data.houseId);
+            snprintf(tenantBuf, sizeof(tenantBuf), "%d", v->data.tenantId);
+            snprintf(agentBuf, sizeof(agentBuf), "%d", v->data.agentId);
+            if (!contains_case_insensitive(v->data.datetime, kw) &&
+                !contains_case_insensitive(v->data.tenantFeedback, kw) &&
+                !contains_case_insensitive(v->data.agentFeedback, kw) &&
+                !contains_case_insensitive(viewing_state_text(v->data.status), kw) &&
+                !contains_case_insensitive(idBuf, kw) &&
+                !contains_case_insensitive(houseBuf, kw) &&
+                !contains_case_insensitive(tenantBuf, kw) &&
+                !contains_case_insensitive(agentBuf, kw)) {
+                continue;
+            }
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else if (mode == 8) {
+        int enableTenant = 0;
+        int enableAgent = 0;
+        int enableHouse = 0;
+        int enableStatus = 0;
+        int enableTime = 0;
+        int enableKeyword = 0;
+        int tenantId = 0;
+        int agentId = 0;
+        int houseId = 0;
+        int st = 0;
+        char start[20] = "";
+        char end[20] = "";
+        char kw[MAX_STR] = "";
+        enableTenant = input_yes_no("按租客ID过滤?");
+        if (enableTenant) tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+        enableAgent = input_yes_no("按中介ID过滤?");
+        if (enableAgent) agentId = input_int("中介ID: ", 1, 99999999);
+        enableHouse = input_yes_no("按房源ID过滤?");
+        if (enableHouse) houseId = input_int("房源ID: ", 1, 99999999);
+        enableStatus = input_yes_no("按看房状态过滤?");
+        if (enableStatus) st = input_int("看房状态(0待确认 1已确认 2已完成 3已取消 4未赴约): ", 0, 4);
+        enableTime = input_yes_no("按时间范围过滤?");
+        if (enableTime) {
+            while (1) {
+                input_non_empty("开始时间(YYYY-MM-DD HH:MM): ", start, sizeof(start));
+                if (validate_datetime(start)) break;
+                printf("时间格式错误。\n");
+            }
+            while (1) {
+                input_non_empty("结束时间(YYYY-MM-DD HH:MM): ", end, sizeof(end));
+                if (validate_datetime(end)) break;
+                printf("时间格式错误。\n");
+            }
+            if (strcmp(end, start) < 0) {
+                printf("结束时间不能早于开始时间。\n");
+                return;
+            }
+        }
+        enableKeyword = input_yes_no("按关键字模糊过滤?");
+        if (enableKeyword) input_non_empty("关键字(时间/反馈/状态/ID): ", kw, sizeof(kw));
+
+        for (v = g_db.viewings; v; v = v->next) {
+            char idBuf[32], houseBuf[32], tenantBuf[32], agentBuf[32];
+            if (enableTenant && v->data.tenantId != tenantId) continue;
+            if (enableAgent && v->data.agentId != agentId) continue;
+            if (enableHouse && v->data.houseId != houseId) continue;
+            if (enableStatus && v->data.status != st) continue;
+            if (enableTime) {
+                if (strcmp(v->data.datetime, start) < 0) continue;
+                if (strcmp(v->data.datetime, end) > 0) continue;
+            }
+            if (enableKeyword) {
+                snprintf(idBuf, sizeof(idBuf), "%d", v->data.id);
+                snprintf(houseBuf, sizeof(houseBuf), "%d", v->data.houseId);
+                snprintf(tenantBuf, sizeof(tenantBuf), "%d", v->data.tenantId);
+                snprintf(agentBuf, sizeof(agentBuf), "%d", v->data.agentId);
+                if (!contains_case_insensitive(v->data.datetime, kw) &&
+                    !contains_case_insensitive(v->data.tenantFeedback, kw) &&
+                    !contains_case_insensitive(v->data.agentFeedback, kw) &&
+                    !contains_case_insensitive(viewing_state_text(v->data.status), kw) &&
+                    !contains_case_insensitive(idBuf, kw) &&
+                    !contains_case_insensitive(houseBuf, kw) &&
+                    !contains_case_insensitive(tenantBuf, kw) &&
+                    !contains_case_insensitive(agentBuf, kw)) {
+                    continue;
+                }
+            }
+            print_viewing_detailed(&v->data);
+            cnt++;
+        }
+    } else {
+        list_viewings_all();
+        return;
+    }
+
+    if (!cnt) printf("未找到。\n");
+}
+
 /* 功能: 中介查询租约（多条件）；输入: agentId；输出: 无 */
 static void query_agent_rentals(int agentId) {
     printf("查询属性: 1.租约ID  2.租客ID  3.房源ID  4.履约状态  5.合同日期范围  6.全部  7.关键字模糊  8.签约状态  9.租客性别\n");
@@ -3323,16 +3615,126 @@ static void agent_query_menu(int agentId) {
 
 /* 功能: 中介排序菜单路由；输入: agentId；输出: 无 */
 static void agent_sort_menu(int agentId) {
-    printf("排序菜单: 1.租客看房预约  2.租客租约合同  3.房源\n");
+    printf("排序菜单(均支持单一属性与多属性): 1.租客看房预约  2.租客租约合同  3.房源\n");
     int ch = input_int("请选择排序菜单编号: ", 1, 3);
     if (ch == 1) sort_agent_viewings(agentId);
     else if (ch == 2) sort_agent_rentals(agentId);
     else sort_houses();
 }
 
+/*
+ * 功能: 中介端多属性组合统计。
+ * 实现内容: 支持按日期、租客、房源、看房状态、租约状态、签约状态进行组合筛选，
+ * 并输出看房与租约的数量、均值、金额及转化率指标。
+ * 后续用途:
+ * 1) 支撑中介按业务口径进行复盘与绩效分析。
+ * 2) 与管理员/租客统计口径保持一致，便于横向对比。
+ */
+static void agent_statistics_multi_dimension(int agentId) {
+    int enableDate = 0;
+    int enableTenant = 0;
+    int enableHouse = 0;
+    int enableViewingStatus = 0;
+    int enableRentalStatus = 0;
+    int enableSignStatus = 0;
+    int tenantId = 0;
+    int houseId = 0;
+    int viewingStatus = -1;
+    int rentalStatus = -1;
+    int signStatus = -1;
+    char start[11] = "";
+    char end[11] = "";
+    ViewingNode *v;
+    RentalNode *r;
+    int vTotal = 0;
+    int vCompleted = 0;
+    int vCancelled = 0;
+    int vMissed = 0;
+    int vDurationSum = 0;
+    int rTotal = 0;
+    int rConfirmed = 0;
+    int rActive = 0;
+    double rentSum = 0.0;
+    double depositSum = 0.0;
+    double durationSum = 0.0;
+    int houses[2048];
+    int tenants[2048];
+    int houseCount = 0;
+    int tenantCount = 0;
+
+    printf("多属性统计支持组合过滤: 日期区间 + 租客ID + 房源ID + 看房状态 + 租约状态 + 签约状态\n");
+    enableDate = input_yes_no("按日期区间过滤?");
+    if (enableDate && !input_date_range(start, end)) return;
+    enableTenant = input_yes_no("按租客ID过滤?");
+    if (enableTenant) tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+    enableHouse = input_yes_no("按房源ID过滤?");
+    if (enableHouse) houseId = input_int("房源ID: ", 1, 99999999);
+    enableViewingStatus = input_yes_no("按看房状态过滤?");
+    if (enableViewingStatus) viewingStatus = input_int("看房状态(0待确认 1已确认 2已完成 3已取消 4未赴约): ", 0, 4);
+    enableRentalStatus = input_yes_no("按租约履约状态过滤?");
+    if (enableRentalStatus) rentalStatus = input_int("租约状态(0有效 1到期 2提前退租): ", 0, 2);
+    enableSignStatus = input_yes_no("按签约状态过滤?");
+    if (enableSignStatus) signStatus = input_int("签约状态(0待签 1已签 2拒签 3撤销): ", 0, 3);
+
+    for (v = g_db.viewings; v; v = v->next) {
+        char viewDate[11];
+        if (v->data.agentId != agentId) continue;
+        if (enableTenant && v->data.tenantId != tenantId) continue;
+        if (enableHouse && v->data.houseId != houseId) continue;
+        if (enableViewingStatus && v->data.status != viewingStatus) continue;
+        if (!extract_date_from_datetime(v->data.datetime, viewDate)) continue;
+        if (!date_in_optional_range(viewDate, start, end, enableDate)) continue;
+        vTotal++;
+        vDurationSum += v->data.durationMinutes;
+        if (v->data.status == VIEWING_COMPLETED) vCompleted++;
+        else if (v->data.status == VIEWING_CANCELLED) vCancelled++;
+        else if (v->data.status == VIEWING_MISSED) vMissed++;
+        if (!id_in_list(houses, houseCount, v->data.houseId) && houseCount < (int)(sizeof(houses) / sizeof(houses[0]))) {
+            houses[houseCount++] = v->data.houseId;
+        }
+        if (!id_in_list(tenants, tenantCount, v->data.tenantId) && tenantCount < (int)(sizeof(tenants) / sizeof(tenants[0]))) {
+            tenants[tenantCount++] = v->data.tenantId;
+        }
+    }
+
+    for (r = g_db.rentals; r; r = r->next) {
+        if (r->data.agentId != agentId) continue;
+        if (enableTenant && r->data.tenantId != tenantId) continue;
+        if (enableHouse && r->data.houseId != houseId) continue;
+        if (enableRentalStatus && r->data.status != rentalStatus) continue;
+        if (enableSignStatus && r->data.signStatus != signStatus) continue;
+        if (!date_in_optional_range(r->data.contractDate, start, end, enableDate)) continue;
+        rTotal++;
+        if (r->data.signStatus == RENTAL_SIGN_CONFIRMED) rConfirmed++;
+        if (r->data.status == RENTAL_ACTIVE) rActive++;
+        rentSum += r->data.monthlyRent;
+        depositSum += r->data.deposit;
+        durationSum += rental_duration_days(&r->data);
+        if (!id_in_list(houses, houseCount, r->data.houseId) && houseCount < (int)(sizeof(houses) / sizeof(houses[0]))) {
+            houses[houseCount++] = r->data.houseId;
+        }
+        if (!id_in_list(tenants, tenantCount, r->data.tenantId) && tenantCount < (int)(sizeof(tenants) / sizeof(tenants[0]))) {
+            tenants[tenantCount++] = r->data.tenantId;
+        }
+    }
+
+    printf("中介ID:%d 多属性统计结果\n", agentId);
+    if (enableDate) printf("日期区间:%s ~ %s\n", start, end);
+    printf("看房: 总数:%d 已完成:%d 已取消:%d 未赴约:%d 平均时长:%.2f分钟\n",
+           vTotal, vCompleted, vCancelled, vMissed, vTotal ? (double)vDurationSum / vTotal : 0.0);
+    printf("租约: 总数:%d 已签:%d 有效:%d 平均月租:%.2f 平均租期:%.2f天\n",
+           rTotal, rConfirmed, rActive,
+           rTotal ? rentSum / rTotal : 0.0,
+           rTotal ? durationSum / rTotal : 0.0);
+    printf("累计月租:%.2f 累计押金:%.2f 覆盖房源:%d 涉及租客:%d\n",
+           rentSum, depositSum, houseCount, tenantCount);
+    printf("看房完成->签约转化率:%.2f%%\n",
+           vCompleted ? (double)rConfirmed * 100.0 / vCompleted : 0.0);
+}
+
 /* 功能: 中介业务统计菜单；输入: agentId；输出: 无 */
 static void agent_statistics_menu(int agentId) {
-    int ch = input_int("1看房统计 2租约统计 3指定租客业务统计 4按签约月份统计 5按日期区间统计看房 6按日期区间统计租约: ", 1, 6);
+    int ch = input_int("1看房统计 2租约统计 3指定租客业务统计 4按签约月份统计 5按日期区间统计看房 6按日期区间统计租约 7多属性组合统计: ", 1, 7);
     if (ch == 1) {
         ViewingNode *v;
         int total = 0;
@@ -3436,7 +3838,7 @@ static void agent_statistics_menu(int agentId) {
         }
         printf("区间[%s ~ %s] 看房次数:%d 平均时长:%.2f分钟\n",
                startDT, endDT, cnt, cnt ? (double)durationSum / cnt : 0.0);
-    } else {
+    } else if (ch == 6) {
         char start[11], end[11];
         time_t winStart, winEnd;
         RentalNode *r;
@@ -3463,6 +3865,8 @@ static void agent_statistics_menu(int agentId) {
         }
         printf("区间[%s ~ %s] 签约数:%d 平均月租:%.2f 平均租期:%.2f天\n",
                start, end, cnt, cnt ? rentSum / cnt : 0.0, cnt ? durationSum / cnt : 0.0);
+    } else {
+        agent_statistics_multi_dimension(agentId);
     }
 }
 
@@ -4095,16 +4499,126 @@ static void tenant_query_menu(int tenantId) {
 
 /* 功能: 租客排序菜单路由；输入: tenantId；输出: 无 */
 static void tenant_sort_menu(int tenantId) {
-    printf("排序菜单: 1.房源  2.我的看房  3.我的租约\n");
+    printf("排序菜单(均支持单一属性与多属性): 1.房源  2.我的看房  3.我的租约\n");
     int ch = input_int("请选择排序菜单编号: ", 1, 3);
     if (ch == 1) sort_houses();
     else if (ch == 2) sort_tenant_viewings(tenantId);
     else sort_tenant_rentals(tenantId);
 }
 
+/*
+ * 功能: 租客端多属性组合统计。
+ * 实现内容: 支持按日期、中介、房源、看房状态、租约状态、签约状态组合过滤，
+ * 输出个人看房与签约概览、租金/押金汇总及完成看房到签约转化率。
+ * 后续用途:
+ * 1) 帮助租客快速评估自己的看房与租房整体情况。
+ * 2) 为“按条件统计 + 预设统计”提供统一可扩展基座。
+ */
+static void tenant_statistics_multi_dimension(int tenantId) {
+    int enableDate = 0;
+    int enableAgent = 0;
+    int enableHouse = 0;
+    int enableViewingStatus = 0;
+    int enableRentalStatus = 0;
+    int enableSignStatus = 0;
+    int agentId = 0;
+    int houseId = 0;
+    int viewingStatus = -1;
+    int rentalStatus = -1;
+    int signStatus = -1;
+    char start[11] = "";
+    char end[11] = "";
+    ViewingNode *v;
+    RentalNode *r;
+    int vTotal = 0;
+    int vCompleted = 0;
+    int vCancelled = 0;
+    int vMissed = 0;
+    int vDurationSum = 0;
+    int rTotal = 0;
+    int rConfirmed = 0;
+    int rActive = 0;
+    double rentSum = 0.0;
+    double depositSum = 0.0;
+    double durationSum = 0.0;
+    int houses[2048];
+    int agents[2048];
+    int houseCount = 0;
+    int agentCount = 0;
+
+    printf("多属性统计支持组合过滤: 日期区间 + 中介ID + 房源ID + 看房状态 + 租约状态 + 签约状态\n");
+    enableDate = input_yes_no("按日期区间过滤?");
+    if (enableDate && !input_date_range(start, end)) return;
+    enableAgent = input_yes_no("按中介ID过滤?");
+    if (enableAgent) agentId = input_int("中介ID: ", 1, 99999999);
+    enableHouse = input_yes_no("按房源ID过滤?");
+    if (enableHouse) houseId = input_int("房源ID: ", 1, 99999999);
+    enableViewingStatus = input_yes_no("按看房状态过滤?");
+    if (enableViewingStatus) viewingStatus = input_int("看房状态(0待确认 1已确认 2已完成 3已取消 4未赴约): ", 0, 4);
+    enableRentalStatus = input_yes_no("按租约履约状态过滤?");
+    if (enableRentalStatus) rentalStatus = input_int("租约状态(0有效 1到期 2提前退租): ", 0, 2);
+    enableSignStatus = input_yes_no("按签约状态过滤?");
+    if (enableSignStatus) signStatus = input_int("签约状态(0待签 1已签 2拒签 3撤销): ", 0, 3);
+
+    for (v = g_db.viewings; v; v = v->next) {
+        char viewDate[11];
+        if (v->data.tenantId != tenantId) continue;
+        if (enableAgent && v->data.agentId != agentId) continue;
+        if (enableHouse && v->data.houseId != houseId) continue;
+        if (enableViewingStatus && v->data.status != viewingStatus) continue;
+        if (!extract_date_from_datetime(v->data.datetime, viewDate)) continue;
+        if (!date_in_optional_range(viewDate, start, end, enableDate)) continue;
+        vTotal++;
+        vDurationSum += v->data.durationMinutes;
+        if (v->data.status == VIEWING_COMPLETED) vCompleted++;
+        else if (v->data.status == VIEWING_CANCELLED) vCancelled++;
+        else if (v->data.status == VIEWING_MISSED) vMissed++;
+        if (!id_in_list(houses, houseCount, v->data.houseId) && houseCount < (int)(sizeof(houses) / sizeof(houses[0]))) {
+            houses[houseCount++] = v->data.houseId;
+        }
+        if (v->data.agentId > 0 && !id_in_list(agents, agentCount, v->data.agentId) && agentCount < (int)(sizeof(agents) / sizeof(agents[0]))) {
+            agents[agentCount++] = v->data.agentId;
+        }
+    }
+
+    for (r = g_db.rentals; r; r = r->next) {
+        if (r->data.tenantId != tenantId) continue;
+        if (enableAgent && r->data.agentId != agentId) continue;
+        if (enableHouse && r->data.houseId != houseId) continue;
+        if (enableRentalStatus && r->data.status != rentalStatus) continue;
+        if (enableSignStatus && r->data.signStatus != signStatus) continue;
+        if (!date_in_optional_range(r->data.contractDate, start, end, enableDate)) continue;
+        rTotal++;
+        if (r->data.signStatus == RENTAL_SIGN_CONFIRMED) rConfirmed++;
+        if (r->data.status == RENTAL_ACTIVE) rActive++;
+        rentSum += r->data.monthlyRent;
+        depositSum += r->data.deposit;
+        durationSum += rental_duration_days(&r->data);
+        if (!id_in_list(houses, houseCount, r->data.houseId) && houseCount < (int)(sizeof(houses) / sizeof(houses[0]))) {
+            houses[houseCount++] = r->data.houseId;
+        }
+        if (r->data.agentId > 0 && !id_in_list(agents, agentCount, r->data.agentId) && agentCount < (int)(sizeof(agents) / sizeof(agents[0]))) {
+            agents[agentCount++] = r->data.agentId;
+        }
+    }
+
+    printf("租客ID:%d 多属性统计结果\n", tenantId);
+    if (enableDate) printf("日期区间:%s ~ %s\n", start, end);
+    printf("看房: 总数:%d 已完成:%d 已取消:%d 未赴约:%d 平均时长:%.2f分钟\n",
+           vTotal, vCompleted, vCancelled, vMissed, vTotal ? (double)vDurationSum / vTotal : 0.0);
+    printf("租约: 总数:%d 已签:%d 有效:%d 平均月租:%.2f 平均租期:%.2f天\n",
+           rTotal, rConfirmed, rActive,
+           rTotal ? rentSum / rTotal : 0.0,
+           rTotal ? durationSum / rTotal : 0.0);
+    printf("累计月租:%.2f 累计押金:%.2f 涉及房源:%d 涉及中介:%d\n",
+           rentSum, depositSum, houseCount, agentCount);
+    printf("看房完成->签约转化率:%.2f%%\n",
+           vCompleted ? (double)rConfirmed * 100.0 / vCompleted : 0.0);
+}
+
 /* 功能: 租客统计菜单；输入: tenantId；输出: 无 */
 static void tenant_statistics_menu(int tenantId) {
-    int ch = input_int("1看房统计 2租约统计 3按时间范围统计看房 4按月份统计租约 5按日期区间统计租约: ", 1, 5);
+    int ch = input_int("1看房统计 2租约统计 3按时间范围统计看房 4按月份统计租约 5按日期区间统计租约 6多属性组合统计: ", 1, 6);
     if (ch == 1) {
         ViewingNode *v;
         int total = 0;
@@ -4188,7 +4702,7 @@ static void tenant_statistics_menu(int tenantId) {
             rentSum += r->data.monthlyRent;
         }
         printf("月份:%s 租约数:%d 平均月租:%.2f\n", month, cnt, cnt ? rentSum / cnt : 0.0);
-    } else {
+    } else if (ch == 5) {
         char start[11], end[11];
         time_t winStart, winEnd;
         RentalNode *r;
@@ -4219,6 +4733,8 @@ static void tenant_statistics_menu(int tenantId) {
                start, end, cnt, active,
                cnt ? rentSum / cnt : 0.0,
                cnt ? durationSum / cnt : 0.0);
+    } else {
+        tenant_statistics_multi_dimension(tenantId);
     }
 }
 
@@ -4245,8 +4761,8 @@ static void change_agent_password(AgentNode *a) {
 
 /* 功能: 房源排序；输入: 排序策略；输出: 无 */
 static void sort_houses(void) {
-    printf("排序属性: 1.面积  2.租金  3.区域(同区域再按租金)\n");
-    int mode = input_int("请选择排序属性编号: ", 1, 3);
+    printf("排序属性: 1.面积(单一)  2.租金(单一)  3.区域(单一，区域内按租金)  4.组合(租金->面积->装修)\n");
+    int mode = input_int("请选择排序属性编号: ", 1, 4);
     int ord = input_int("1升序 2降序: ", 1, 2);
     House *arr;
     int n = g_db.houseCount;
@@ -4269,7 +4785,26 @@ static void sort_houses(void) {
     for (i = 0; i < n - 1; ++i) {
         for (j = 0; j < n - i - 1; ++j) {
             int swap;
-            if (mode == 3) {
+            if (mode == 4) {
+                double p1 = arr[j].price, p2 = arr[j + 1].price;
+                double a1 = arr[j].area, a2 = arr[j + 1].area;
+                int d1 = 9999, d2 = 9999;
+                int k;
+                for (k = 0; k < g_db.decorations.count; ++k) {
+                    if (strcmp(arr[j].decoration, g_db.decorations.items[k]) == 0) d1 = k;
+                    if (strcmp(arr[j + 1].decoration, g_db.decorations.items[k]) == 0) d2 = k;
+                }
+                if (p1 != p2) {
+                    swap = (ord == 1) ? (p1 > p2) : (p1 < p2);
+                } else if (a1 != a2) {
+                    swap = (ord == 1) ? (a1 > a2) : (a1 < a2);
+                } else if (d1 != d2) {
+                    swap = (ord == 1) ? (d1 > d2) : (d1 < d2);
+                } else {
+                    int c = strcmp(arr[j].decoration, arr[j + 1].decoration);
+                    swap = (ord == 1) ? (c > 0) : (c < 0);
+                }
+            } else if (mode == 3) {
                 int c = strcmp(arr[j].region, arr[j + 1].region);
                 if (c == 0) {
                     double a = arr[j].price;
@@ -4335,15 +4870,26 @@ static void query_houses_combo(void) {
 
 /* 功能: 查询房源在指定时段是否可预约；输入: 房源ID/时段；输出: 无 */
 static void query_house_availability_by_time(void) {
-    int houseId;
+    int houseId = 0;
+    char houseBuf[32];
     char dt[20];
     int dur;
+    char *end;
     HouseNode *h;
-    houseId = input_int("房源ID: ", 1, 99999999);
-    h = find_house(houseId);
-    if (!h) {
-        printf("房源不存在。\n");
-        return;
+    printf("房源ID(可空，回车查询该时段全部可预约房源): ");
+    read_line(houseBuf, sizeof(houseBuf));
+    if (houseBuf[0]) {
+        long v = strtol(houseBuf, &end, 10);
+        if (end == houseBuf || *end != '\0' || v < 1 || v > 99999999) {
+            printf("房源ID输入无效。\n");
+            return;
+        }
+        houseId = (int)v;
+        h = find_house(houseId);
+        if (!h) {
+            printf("房源不存在。\n");
+            return;
+        }
     }
     while (1) {
         input_non_empty("查询时间(YYYY-MM-DD HH:MM): ", dt, sizeof(dt));
@@ -4358,14 +4904,32 @@ static void query_house_availability_by_time(void) {
         break;
     }
     dur = input_int("时长(分钟): ", 10, 600);
-    if (!house_is_open_for_viewing(&h->data)) {
-        printf("该房源当前不可预约。\n");
-        return;
-    }
-    if (viewing_conflict(dt, dur, houseId, 0, -1)) {
-        printf("该时段房源已被预约冲突占用。\n");
+    if (houseId > 0) {
+        if (!house_is_open_for_viewing(&h->data)) {
+            printf("该房源当前不可预约。\n");
+            return;
+        }
+        if (viewing_conflict(dt, dur, houseId, 0, -1)) {
+            printf("该时段房源已被预约冲突占用。\n");
+        } else {
+            printf("该时段房源可预约。\n");
+        }
     } else {
-        printf("该时段房源可预约。\n");
+        int cnt = 0;
+        printf("\n%-8s %-16s %-10s %-8s\n", "ID", "小区", "价格", "状态");
+        printf("------------------------------------------------\n");
+        for (h = g_db.houses; h; h = h->next) {
+            if (!house_is_open_for_viewing(&h->data)) continue;
+            if (viewing_conflict(dt, dur, h->data.id, 0, -1)) continue;
+            printf("%-8d %-16s %-10.2f %-8s\n",
+                   h->data.id,
+                   h->data.community,
+                   h->data.price,
+                   "可预约");
+            cnt++;
+        }
+        if (!cnt) printf("该时段暂无可预约房源。\n");
+        else printf("该时段共找到%d套可预约房源。\n", cnt);
     }
 }
 
@@ -4569,16 +5133,138 @@ static void sort_rentals_all(void) {
 
 /* 功能: 管理员排序菜单路由；输入: 无；输出: 无 */
 static void admin_sort_menu(void) {
-    printf("排序菜单: 1.房源  2.看房  3.租约\n");
+    printf("排序菜单(均支持单一属性与多属性): 1.房源  2.看房  3.租约\n");
     int ch = input_int("请选择排序菜单编号: ", 1, 3);
     if (ch == 1) sort_houses();
     else if (ch == 2) sort_viewings_all();
     else sort_rentals_all();
 }
 
+/*
+ * 功能: 管理员端多属性组合统计。
+ * 实现内容: 基于全量数据按租客/中介/房源/状态/日期等维度组合过滤，
+ * 输出跨角色、跨业务链路的看房与租约核心指标。
+ * 后续用途:
+ * 1) 支撑管理层进行经营视角的数据汇总与对账。
+ * 2) 作为后续扩展报表导出与趋势分析的基础实现。
+ */
+static void admin_statistics_multi_dimension(void) {
+    int enableDate = 0;
+    int enableTenant = 0;
+    int enableAgent = 0;
+    int enableHouse = 0;
+    int enableViewingStatus = 0;
+    int enableRentalStatus = 0;
+    int enableSignStatus = 0;
+    int tenantId = 0;
+    int agentId = 0;
+    int houseId = 0;
+    int viewingStatus = -1;
+    int rentalStatus = -1;
+    int signStatus = -1;
+    char start[11] = "";
+    char end[11] = "";
+    ViewingNode *v;
+    RentalNode *r;
+    int vTotal = 0;
+    int vCompleted = 0;
+    int vCancelled = 0;
+    int vMissed = 0;
+    int vDurationSum = 0;
+    int rTotal = 0;
+    int rConfirmed = 0;
+    int rActive = 0;
+    double rentSum = 0.0;
+    double depositSum = 0.0;
+    double durationSum = 0.0;
+    int houses[4096];
+    int tenants[4096];
+    int agents[4096];
+    int houseCount = 0;
+    int tenantCount = 0;
+    int agentCount = 0;
+
+    printf("多属性统计支持组合过滤: 日期区间 + 租客ID + 中介ID + 房源ID + 看房状态 + 租约状态 + 签约状态\n");
+    enableDate = input_yes_no("按日期区间过滤?");
+    if (enableDate && !input_date_range(start, end)) return;
+    enableTenant = input_yes_no("按租客ID过滤?");
+    if (enableTenant) tenantId = input_int("租客ID: ", TENANT_ID_MIN, TENANT_ID_MAX);
+    enableAgent = input_yes_no("按中介ID过滤?");
+    if (enableAgent) agentId = input_int("中介ID: ", 1, 99999999);
+    enableHouse = input_yes_no("按房源ID过滤?");
+    if (enableHouse) houseId = input_int("房源ID: ", 1, 99999999);
+    enableViewingStatus = input_yes_no("按看房状态过滤?");
+    if (enableViewingStatus) viewingStatus = input_int("看房状态(0待确认 1已确认 2已完成 3已取消 4未赴约): ", 0, 4);
+    enableRentalStatus = input_yes_no("按租约履约状态过滤?");
+    if (enableRentalStatus) rentalStatus = input_int("租约状态(0有效 1到期 2提前退租): ", 0, 2);
+    enableSignStatus = input_yes_no("按签约状态过滤?");
+    if (enableSignStatus) signStatus = input_int("签约状态(0待签 1已签 2拒签 3撤销): ", 0, 3);
+
+    for (v = g_db.viewings; v; v = v->next) {
+        char viewDate[11];
+        if (enableTenant && v->data.tenantId != tenantId) continue;
+        if (enableAgent && v->data.agentId != agentId) continue;
+        if (enableHouse && v->data.houseId != houseId) continue;
+        if (enableViewingStatus && v->data.status != viewingStatus) continue;
+        if (!extract_date_from_datetime(v->data.datetime, viewDate)) continue;
+        if (!date_in_optional_range(viewDate, start, end, enableDate)) continue;
+        vTotal++;
+        vDurationSum += v->data.durationMinutes;
+        if (v->data.status == VIEWING_COMPLETED) vCompleted++;
+        else if (v->data.status == VIEWING_CANCELLED) vCancelled++;
+        else if (v->data.status == VIEWING_MISSED) vMissed++;
+        if (!id_in_list(houses, houseCount, v->data.houseId) && houseCount < (int)(sizeof(houses) / sizeof(houses[0]))) {
+            houses[houseCount++] = v->data.houseId;
+        }
+        if (!id_in_list(tenants, tenantCount, v->data.tenantId) && tenantCount < (int)(sizeof(tenants) / sizeof(tenants[0]))) {
+            tenants[tenantCount++] = v->data.tenantId;
+        }
+        if (v->data.agentId > 0 && !id_in_list(agents, agentCount, v->data.agentId) && agentCount < (int)(sizeof(agents) / sizeof(agents[0]))) {
+            agents[agentCount++] = v->data.agentId;
+        }
+    }
+
+    for (r = g_db.rentals; r; r = r->next) {
+        if (enableTenant && r->data.tenantId != tenantId) continue;
+        if (enableAgent && r->data.agentId != agentId) continue;
+        if (enableHouse && r->data.houseId != houseId) continue;
+        if (enableRentalStatus && r->data.status != rentalStatus) continue;
+        if (enableSignStatus && r->data.signStatus != signStatus) continue;
+        if (!date_in_optional_range(r->data.contractDate, start, end, enableDate)) continue;
+        rTotal++;
+        if (r->data.signStatus == RENTAL_SIGN_CONFIRMED) rConfirmed++;
+        if (r->data.status == RENTAL_ACTIVE) rActive++;
+        rentSum += r->data.monthlyRent;
+        depositSum += r->data.deposit;
+        durationSum += rental_duration_days(&r->data);
+        if (!id_in_list(houses, houseCount, r->data.houseId) && houseCount < (int)(sizeof(houses) / sizeof(houses[0]))) {
+            houses[houseCount++] = r->data.houseId;
+        }
+        if (!id_in_list(tenants, tenantCount, r->data.tenantId) && tenantCount < (int)(sizeof(tenants) / sizeof(tenants[0]))) {
+            tenants[tenantCount++] = r->data.tenantId;
+        }
+        if (r->data.agentId > 0 && !id_in_list(agents, agentCount, r->data.agentId) && agentCount < (int)(sizeof(agents) / sizeof(agents[0]))) {
+            agents[agentCount++] = r->data.agentId;
+        }
+    }
+
+    printf("管理员多属性统计结果\n");
+    if (enableDate) printf("日期区间:%s ~ %s\n", start, end);
+    printf("看房: 总数:%d 已完成:%d 已取消:%d 未赴约:%d 平均时长:%.2f分钟\n",
+           vTotal, vCompleted, vCancelled, vMissed, vTotal ? (double)vDurationSum / vTotal : 0.0);
+    printf("租约: 总数:%d 已签:%d 有效:%d 平均月租:%.2f 平均租期:%.2f天\n",
+           rTotal, rConfirmed, rActive,
+           rTotal ? rentSum / rTotal : 0.0,
+           rTotal ? durationSum / rTotal : 0.0);
+    printf("累计月租:%.2f 累计押金:%.2f 覆盖房源:%d 涉及租客:%d 涉及中介:%d\n",
+           rentSum, depositSum, houseCount, tenantCount, agentCount);
+    printf("看房完成->签约转化率:%.2f%%\n",
+           vCompleted ? (double)rConfirmed * 100.0 / vCompleted : 0.0);
+}
+
 /* 功能: 管理员统计菜单；输入: 无；输出: 无 */
 static void admin_statistics_menu(void) {
-    int ch = input_int("1房源统计 2看房统计 3租约统计 4租客租房统计 5按月统计签约 6按日期区间统计出租率 7按日期区间统计租约: ", 1, 7);
+    int ch = input_int("1房源统计 2看房统计 3租约统计 4租客租房统计 5按月统计签约 6按日期区间统计出租率 7按日期区间统计租约 8多属性组合统计: ", 1, 8);
     if (ch == 1) {
         HouseNode *h;
         int total = 0, vacant = 0, rented = 0, pending = 0, offline = 0;
@@ -4691,7 +5377,7 @@ static void admin_statistics_menu(void) {
         }
         printf("区间[%s ~ %s] 可统计房源:%d 区间内有出租房源:%d 出租率:%.2f%%\n",
                start, end, total, occupied, total ? (double)occupied * 100.0 / total : 0.0);
-    } else {
+    } else if (ch == 7) {
         char start[11], end[11];
         time_t winStart, winEnd;
         RentalNode *r;
@@ -4718,6 +5404,8 @@ static void admin_statistics_menu(void) {
         }
         printf("区间[%s ~ %s] 已签租约:%d 平均月租:%.2f 平均租期:%.2f天\n",
                start, end, cnt, cnt ? rentSum / cnt : 0.0, cnt ? durationSum / cnt : 0.0);
+    } else {
+        admin_statistics_multi_dimension();
     }
 }
 
@@ -4791,7 +5479,7 @@ static void admin_menu(void) {
         printf("14. 信息查询-组合查房\n");
         printf("15. 信息排序\n");
         printf("16. 看房管理-分配中介\n");
-        printf("17. 信息查询-看房记录\n");
+        printf("17. 信息查询-看房记录(简单/模糊/组合)\n");
         printf("18. 信息查询-租约记录\n");
         printf("19. 租房管理-租约状态管理\n");
         printf("20. 信息查询-按签约日期查租约\n");
@@ -4804,8 +5492,9 @@ static void admin_menu(void) {
         printf("27. 系统维护-修改管理员密码\n");
         printf("28. 系统维护-备份到指定文件\n");
         printf("29. 系统维护-从指定文件恢复\n");
+        printf("30. 信息查询-已签订合同(全部)\n");
         printf("0. 退出登录\n");
-        ch = input_int("请选择菜单编号: ", 0, 29);
+        ch = input_int("请选择菜单编号: ", 0, 30);
         if (ch == 0) {
             g_back_ctx = prev;
             return;
@@ -4862,7 +5551,7 @@ static void admin_menu(void) {
             assign_viewings_admin();
             needSave = 1;
         }
-        else if (ch == 17) list_viewings_all();
+        else if (ch == 17) admin_query_viewings();
         else if (ch == 18) list_rentals_admin_filtered();
         else if (ch == 19) {
             update_rental_status_admin();
@@ -4889,9 +5578,11 @@ static void admin_menu(void) {
             needSave = 1;
         }
         else if (ch == 28) backup_data_to_custom_file();
-        else {
+        else if (ch == 29) {
             restore_data_from_custom_file();
             needSave = 1;
+        } else {
+            list_rentals_signed_all();
         }
         if (needSave) autosave_default();
     }
@@ -5027,7 +5718,7 @@ static void tenant_menu(TenantNode *t) {
         int needSave = 0;
         printf("\n====== 租客菜单 ======\n");
         printf("提示: 任意输入处可用 # 回退上一级；-1 在当前不作为有效值时也可回退。\n");
-        printf("1. 查询房源并预约(推荐)\n");
+        printf("1. 预约入口(查时段可约/查询房源并预约)\n");
         printf("2. 修改看房预约\n");
         printf("3. 删除看房预约\n");
         printf("4. 信息查询\n");
@@ -5054,7 +5745,7 @@ static void tenant_menu(TenantNode *t) {
             return;
         }
         if (ch == 1) {
-            add_viewing_for_tenant(tenantId);
+            tenant_booking_entry_menu(tenantId);
         }
         else if (ch == 2) {
             if (!tenant_has_modifiable_viewing(tenantId)) {

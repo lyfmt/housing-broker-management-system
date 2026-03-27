@@ -1,3 +1,8 @@
+/*
+ * 文件: data_path_utils.c
+ * 定义内容: 数据文件路径探测、归一化与构建目录映射逻辑。
+ * 后续用途: 确保不同操作系统和不同启动目录下都能稳定定位数据文件。
+ */
 #include "data_path_utils.h"
 
 #include <ctype.h>

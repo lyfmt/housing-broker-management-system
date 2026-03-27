@@ -1,6 +1,12 @@
 #ifndef RENTAL_SYSTEM_H
 #define RENTAL_SYSTEM_H
 
+/*
+ * 文件: rental_system.h
+ * 定义内容: 系统核心领域模型、状态常量与主流程入口声明。
+ * 后续用途: 作为全项目共享的业务契约头文件，供存储层/业务层/工具层共同依赖。
+ */
+
 #include <time.h>
 
 /* ==================== 常量定义 ==================== */
@@ -42,7 +48,14 @@
 #define RENTAL_SIGN_REJECTED   2  /* 已拒签 */
 #define RENTAL_SIGN_CANCELLED  3  /* 已撤销 */
 
-/* ==================== 分类列表 ==================== */
+/*
+ * 分类列表结构
+ * 作用: 统一承载区域/朝向/装修等可配置字典项。
+ * 后续用途:
+ * 1) 房源录入与修改时作为可选值来源，减少脏数据。
+ * 2) 组合查询与统计时用于枚举和合法性校验。
+ * 3) 管理员分类维护菜单直接操作该结构。
+ */
 typedef struct {
     /* 分类条目二维数组: 最多 MAX_CATEGORY_ITEMS 条，每条最长 MAX_STR-1 字符 */
     char items[MAX_CATEGORY_ITEMS][MAX_STR];
@@ -50,7 +63,14 @@ typedef struct {
     int count;
 } CategoryList;
 
-/* ==================== 中介 ==================== */
+/*
+ * 中介基础信息结构
+ * 作用: 表示单个中介账号及身份信息，是中介业务权限的主体。
+ * 后续用途:
+ * 1) 登录认证与密码管理。
+ * 2) 看房/租约记录中的 agentId 外键关联。
+ * 3) 管理员与统计模块按中介维度查询业务数据。
+ */
 typedef struct {
     int id;
     char name[MAX_STR];
@@ -67,7 +87,14 @@ typedef struct AgentNode {
     struct AgentNode *next;
 } AgentNode;
 
-/* ==================== 租客 ==================== */
+/*
+ * 租客基础信息结构
+ * 作用: 表示单个租客账号及身份信息，是租客端业务的主体。
+ * 后续用途:
+ * 1) 登录认证、资料维护、找回密码校验。
+ * 2) 看房/租约记录中的 tenantId 外键关联。
+ * 3) 管理员与统计模块按租客维度聚合分析。
+ */
 typedef struct {
     int id;
     char name[MAX_STR];
@@ -84,7 +111,14 @@ typedef struct TenantNode {
     struct TenantNode *next;
 } TenantNode;
 
-/* ==================== 房源 ==================== */
+/*
+ * 房源实体结构
+ * 作用: 描述可出租房源的静态属性与上架状态。
+ * 后续用途:
+ * 1) 查询/排序/组合筛选的核心数据源。
+ * 2) 预约冲突校验与租约签订时的合法性判定。
+ * 3) 审核流转与出租状态统计（空闲/已租/待审/下架）。
+ */
 typedef struct {
     int id;
     char city[MAX_STR];
@@ -114,7 +148,14 @@ typedef struct HouseNode {
     struct HouseNode *next;
 } HouseNode;
 
-/* ==================== 看房预约 ==================== */
+/*
+ * 看房预约结构
+ * 作用: 记录一次租客看房申请或安排，覆盖时间、参与方与处理状态。
+ * 后续用途:
+ * 1) 中介待处理预约工作流（同意/拒绝/完成）。
+ * 2) 管理员分配中介与查询审计。
+ * 3) 与租约通过 appointmentId 建立业务闭环，计算转化率。
+ */
 typedef struct {
     int id;
     char datetime[20];    /* YYYY-MM-DD HH:MM */
@@ -135,7 +176,14 @@ typedef struct ViewingNode {
     struct ViewingNode *next;
 } ViewingNode;
 
-/* ==================== 租房合同 ==================== */
+/*
+ * 租约合同结构
+ * 作用: 记录签约结果、租期与履约状态，是租房业务的最终凭据。
+ * 后续用途:
+ * 1) 租客确认/拒签流程与合同状态维护。
+ * 2) 房源状态联动刷新（已租/可租）。
+ * 3) 管理端和中介端按时间、状态、金额做统计分析。
+ */
 typedef struct {
     int id;
     int houseId;
@@ -161,7 +209,14 @@ typedef struct RentalNode {
     struct RentalNode *next;
 } RentalNode;
 
-/* ==================== 全局数据库 ==================== */
+/*
+ * 全局数据库结构
+ * 作用: 运行期内存数据库，聚合系统全部业务链表和计数器。
+ * 后续用途:
+ * 1) 作为查询、排序、统计与业务校验的统一数据源。
+ * 2) 序列化/反序列化时的顶层容器。
+ * 3) 支撑多角色菜单在一次会话内共享状态。
+ */
 typedef struct {
     /* 管理员密码（程序内部可能为明文或哈希串） */
     char adminPassword[32];

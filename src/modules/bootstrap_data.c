@@ -1,3 +1,8 @@
+/*
+ * 文件: bootstrap_data.c
+ * 定义内容: 默认字典与演示数据装载/补齐逻辑，负责把静态演示表写入运行期数据库。
+ * 后续用途: 保障首跑可演示性，并作为回归测试时快速恢复基准数据的入口。
+ */
 #include "bootstrap_data.h"
 
 #include <stdlib.h>
